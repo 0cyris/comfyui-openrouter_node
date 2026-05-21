@@ -1,17 +1,18 @@
 """
-node_audio.py — OpenRouter Audio (TTS) Node
+node_speech.py — OpenRouter Text-to-Speech Node
 
-Targets text-to-speech models on OpenRouter via the dedicated
-/v1/audio/speech endpoint (OpenAI-compatible TTS API).
+Uses the dedicated POST /v1/audio/speech endpoint (OpenAI-compatible TTS API).
+This is distinct from audio-output chat-completion models — use this node for
+pure TTS/speech synthesis tasks.
 
 Request fields:
   input           — text to synthesise
   model           — TTS model ID (e.g. openai/tts-1, elevenlabs/…)
   voice           — speaker preset
   response_format — audio container / codec
-  speed           — optional playback rate
+  speed           — playback rate (0.25–4.0)
 
-Response: application/octet-stream — raw audio bytes decoded into an
+Response: application/octet-stream — raw audio bytes decoded into a
           ComfyUI AUDIO dict {"waveform": Tensor[1,C,N], "sample_rate": int}.
 """
 
@@ -22,7 +23,7 @@ import torch
 from . import openrouter_shared as shared
 
 
-class OpenRouterAudioNode:
+class OpenRouterSpeechNode:
     """
     ComfyUI node for text-to-speech via OpenRouter's /v1/audio/speech endpoint.
 
@@ -85,7 +86,7 @@ class OpenRouterAudioNode:
     RETURN_TYPES = ("AUDIO", "STRING", "STRING")
     RETURN_NAMES = ("audio", "Stats", "Credits")
 
-    FUNCTION = "generate_audio"
+    FUNCTION = "generate_speech"
     CATEGORY = "LLM"
 
     @classmethod
@@ -107,9 +108,9 @@ class OpenRouterAudioNode:
             "sample_rate": 44100
         }
 
-    def generate_audio(self, api_key, prompt, model,
-                       voice="alloy", output_format="mp3", speed=1.0,
-                       request_timeout=120, prompt_input=None):
+    def generate_speech(self, api_key, prompt, model,
+                        voice="alloy", output_format="mp3", speed=1.0,
+                        request_timeout=120, prompt_input=None):
         """
         Calls POST /v1/audio/speech on OpenRouter.
 
@@ -176,7 +177,7 @@ class OpenRouterAudioNode:
                 return (silent, "Stats N/A", "Empty audio response body.")
 
             print(
-                f"[AudioNode] Received {len(audio_bytes)} bytes "
+                f"[SpeechNode] Received {len(audio_bytes)} bytes "
                 f"in {elapsed:.2f}s (format={output_format})"
             )
 
@@ -201,10 +202,10 @@ class OpenRouterAudioNode:
                     error_msg += f" | Status: {e.response.status_code}"
             else:
                 error_msg += " (Network or connection issue)"
-            print(f"[AudioNode] ERROR: {error_msg}")
+            print(f"[SpeechNode] ERROR: {error_msg}")
             return (silent, "Stats N/A due to error", error_msg)
         except Exception as e:
-            print(f"[AudioNode] ERROR: Node Error: {str(e)}")
+            print(f"[SpeechNode] ERROR: Node Error: {str(e)}")
             return (silent, "Stats N/A due to error", f"Node Error: {str(e)}")
 
     @classmethod
@@ -227,9 +228,9 @@ class OpenRouterAudioNode:
 
 
 NODE_CLASS_MAPPINGS = {
-    "OpenRouterAudioNode": OpenRouterAudioNode
+    "OpenRouterSpeechNode": OpenRouterSpeechNode
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "OpenRouterAudioNode": "OpenRouter Audio Generation Node"
+    "OpenRouterSpeechNode": "OpenRouter Speech Node"
 }
