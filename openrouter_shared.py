@@ -49,7 +49,6 @@ ASPECT_RATIO_OPTIONS = [
 IMAGE_RESOLUTION_OPTIONS = ["1K", "2K", "4K"]
 RESOLUTION_MULTIPLIERS = {"1K": 1, "2K": 2, "4K": 4}
 
-VOICE_OPTIONS = ("alloy", "echo", "fable", "onyx", "nova", "shimmer")
 AUDIO_FORMAT_OPTIONS = ("mp3", "pcm", "wav", "opus", "aac", "flac")
 
 # ── Module-level raw model cache ──────────────────────────────────────────────

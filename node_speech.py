@@ -61,7 +61,14 @@ class OpenRouterSpeechNode:
                     "default": "Hello, how can I help you today?"
                 }),
                 "model": (cls.fetch_openrouter_models(),),
-                "voice": (list(shared.VOICE_OPTIONS), {"default": "alloy"}),
+                # Free-text so any provider's voice name works.
+                # OpenAI voices: alloy echo fable onyx nova shimmer
+                # Google Gemini voices: Aoede Charon Fenrir Kore Puck (and others)
+                # ElevenLabs: use the voice ID or name from your ElevenLabs account
+                "voice": ("STRING", {
+                    "multiline": False,
+                    "default": "alloy",
+                }),
                 "output_format": (list(shared.AUDIO_FORMAT_OPTIONS), {"default": "mp3"}),
                 "speed": ("FLOAT", {
                     "default": 1.0,
