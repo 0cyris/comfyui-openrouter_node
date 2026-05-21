@@ -410,12 +410,28 @@ def decode_audio_bytes(audio_bytes, fmt):
 
     Returns {"waveform": Tensor[1, C, N], "sample_rate": int}.
 
-    Fallback chain:
+    PCM is handled first because it is headerless raw samples — container
+    decoders (torchaudio, soundfile, wave) cannot parse it.
+
+    Fallback chain for all other formats:
     1. torchaudio (if installed) — handles mp3/wav/flac/opus/aac
     2. soundfile (if installed)  — handles wav/flac/ogg
     3. stdlib wave               — WAV only
     4. Silent 1-second mono placeholder at 44100 Hz
     """
+    # ── PCM: raw 16-bit signed integer samples, mono, 24000 Hz ───────────────
+    # OpenAI-compatible TTS endpoints return headerless little-endian int16 PCM.
+    # No container decoder can parse this; convert directly.
+    if fmt == "pcm":
+        try:
+            pcm = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            # [N] → [1, 1, N]  (batch=1, channels=1, samples=N)
+            waveform = torch.from_numpy(pcm).unsqueeze(0).unsqueeze(0)
+            return {"waveform": waveform, "sample_rate": 24000}
+        except Exception as e:
+            print(f"[openrouter_shared] PCM decode failed: {e}")
+            return {"waveform": torch.zeros((1, 1, 44100), dtype=torch.float32), "sample_rate": 44100}
+
     buf = io.BytesIO(audio_bytes)
 
     if _HAS_TORCHAUDIO:

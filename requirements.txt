@@ -1,2 +1,3 @@
-tiktoken  # accurate LLM token counting
-Pillow    # image processing
+tiktoken    # accurate LLM token counting
+Pillow      # image processing
+torchcodec  # audio decoding for the speech node (mp3/wav/flac/opus/aac)
