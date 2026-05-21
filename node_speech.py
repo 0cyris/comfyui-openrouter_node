@@ -92,13 +92,16 @@ class OpenRouterSpeechNode:
     @classmethod
     def fetch_openrouter_models(cls):
         """
-        Fetches audio-output model IDs from the OpenRouter API, with caching.
-        Falls back to a hardcoded list of known TTS models if none are found.
+        Returns the list of models compatible with POST /v1/audio/speech.
+
+        The general /api/v1/models endpoint does not reliably expose TTS models,
+        and the audio-output filter would also capture chat-completion models
+        (e.g. gpt-4o-audio-preview) that only work with /chat/completions, not
+        /audio/speech.  So we always start from the hardcoded TTS list and never
+        replace it with the generic filter result.
         """
-        raw, was_refreshed = shared.fetch_all_models_raw()
-        if cls.models_cache is None or was_refreshed:
-            filtered = shared.filter_models_by_output(raw, "audio")
-            cls.models_cache = filtered if filtered else cls._fallback_models[:]
+        if cls.models_cache is None:
+            cls.models_cache = cls._fallback_models[:]
         return cls.models_cache
 
     def _silent_audio(self):
