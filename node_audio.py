@@ -125,11 +125,19 @@ class OpenRouterAudioNode:
         headers = shared.build_standard_headers(api_key)
         url = f"{shared.BASE_URL}/chat/completions"
 
+        # OpenAI audio-in-chat-completions format:
+        #   "modalities": ["text", "audio"]
+        #   "audio": {"voice": "...", "format": "..."}
+        # Note: top-level "response_format" is for JSON-mode text output and must
+        # be an object ({type: ...}), not a string — don't use it for audio format.
         data = {
             "model": model,
+            "modalities": ["text", "audio"],
+            "audio": {
+                "voice": voice,
+                "format": output_format,
+            },
             "messages": [{"role": "user", "content": effective_prompt}],
-            "voice": voice,
-            "response_format": output_format,
         }
 
         try:
