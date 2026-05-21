@@ -2,28 +2,25 @@ import requests
 import json
 import time
 import base64
-import io
-import numpy as np
+import hashlib
 import torch
-import tiktoken
-from PIL import Image
-import hashlib # Added for hashing PDF bytes in IS_CHANGED
-import os
+from . import openrouter_shared as shared
 from .chat_manager import ChatSessionManager
 
 # Define a placeholder type name for PDF data.
 # The actual input connection will accept '*' but we check the structure.
 # Expecting a dictionary: {"filename": str, "bytes": bytes}
-PDF_DATA_TYPE = "*" # Use '*' to accept any type, check structure later
+PDF_DATA_TYPE = "*"  # Use '*' to accept any type, check structure later
 
 class OpenRouterNode:
     """
     A node for interacting with OpenRouter's chat/completion API.
     Supports text, images, and PDFs as input.
-    Returns three outputs:
+    Returns four outputs:
       1) "Output": the text response from the LLM
-      2) "Stats": a string detailing tokens per second, input tokens, and output tokens
-      3) "Credits": a string showing your remaining OpenRouter account balance
+      2) "image": an image tensor if the response contains an image, else empty tensor
+      3) "Stats": a string detailing tokens per second, input tokens, and output tokens
+      4) "Credits": a string showing your remaining OpenRouter account balance
     """
 
     models_cache = None
@@ -46,27 +43,7 @@ class OpenRouterNode:
         2. Environment variable 'LLM_KEY'
         3. config file 'openrouter_api_key.json' in node directory
         """
-        if api_key_ui and api_key_ui.strip():
-            return api_key_ui.strip()
-
-        # Check environment variable
-        env_key = os.environ.get("LLM_KEY")
-        if env_key and env_key.strip():
-            return env_key.strip()
-
-        # Check JSON file
-        config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "openrouter_api_key.json")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                    file_key = config.get("api_key")
-                    if file_key and file_key.strip():
-                        return file_key.strip()
-            except Exception as e:
-                print(f"Error reading openrouter_api_key.json: {e}")
-
-        return ""
+        return shared.get_api_key(api_key_ui)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -92,24 +69,8 @@ class OpenRouterNode:
                 "web_search": ("BOOLEAN", {"default": False}),
                 "cheapest": ("BOOLEAN", {"default": True}),
                 "fastest": ("BOOLEAN", {"default": False}),
-                "aspect_ratio": ([
-                    "auto",
-                    "1:1 (1024x1024)",
-                    "2:3 (832x1248)",
-                    "3:2 (1248x832)",
-                    "3:4 (864x1184)",
-                    "4:3 (1184x864)",
-                    "4:5 (896x1152)",
-                    "5:4 (1152x896)",
-                    "9:16 (768x1344)",
-                    "16:9 (1344x768)",
-                    "21:9 (1536x672)",
-                    "1:4 (google/gemini-3.1-flash-image-preview (Nano Banana 2) only)",
-                    "4:1 (google/gemini-3.1-flash-image-preview (Nano Banana 2) only)",
-                    "1:8 (google/gemini-3.1-flash-image-preview (Nano Banana 2) only)",
-                    "8:1 (google/gemini-3.1-flash-image-preview (Nano Banana 2) only)",
-                ], {"default": "auto"}),
-                "image_resolution": (["1K", "2K", "4K"], {"default": "1K"}),
+                "aspect_ratio": (shared.ASPECT_RATIO_OPTIONS, {"default": "auto"}),
+                "image_resolution": (shared.IMAGE_RESOLUTION_OPTIONS, {"default": "1K"}),
                 "reasoning_effort": (list(cls.reasoning_effort_options), {"default": cls.default_reasoning_effort}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": "fixed"}),
                 "temperature": ("FLOAT", {
@@ -120,7 +81,7 @@ class OpenRouterNode:
                     "display": "slider",
                     "round": 0.01,
                 }),
-                 "pdf_engine": (["auto", "mistral-ocr", "pdf-text"], {"default": "auto"}),
+                "pdf_engine": (["auto", "mistral-ocr", "pdf-text"], {"default": "auto"}),
                 "chat_mode": ("BOOLEAN", {"default": False}),
                 "request_timeout": ("INT", {
                     "default": cls.default_request_timeout,
@@ -131,7 +92,7 @@ class OpenRouterNode:
                 }),
             },
             "optional": {
-                "pdf_data": (PDF_DATA_TYPE,), # Use '*' and check structure in generate_response
+                "pdf_data": (PDF_DATA_TYPE,),  # Use '*' and check structure in generate_response
                 "user_message_input": ("STRING", {"forceInput": True}),
             }
         }
@@ -145,45 +106,34 @@ class OpenRouterNode:
     @classmethod
     def fetch_openrouter_models(cls):
         """
-        Fetches a list of model IDs from the OpenRouter API, caching them.
+        Fetches text-output model IDs from the OpenRouter API, with caching.
+        Filters to only models that support text output.
         """
-        current_time = time.time()
-        if (cls.models_cache is None) or (current_time - cls.last_fetch_time > cls.cache_duration):
-            url = "https://openrouter.ai/api/v1/models"
-            try:
-                response = requests.get(url, timeout=cls.default_request_timeout)
-                response.raise_for_status()
-                models = response.json()["data"]
-                # Filter for models that support chat completions if needed, but API handles this
-                model_list = sorted([model['id'] for model in models])
-                cls.models_cache = model_list
-                cls.last_fetch_time = current_time
-            except requests.exceptions.RequestException as e:
-                print(f"Error fetching models: {e}")
-                # Provide a default list or indicate error if cache is empty
-                if cls.models_cache is None:
-                    cls.models_cache = ["error_fetching_models", "google/gemma-3-27b-it", "openai/gpt-4o"] # Example fallbacks
-        return cls.models_cache if cls.models_cache else ["error_fetching_models"] # Ensure it's never empty
+        raw, was_refreshed = shared.fetch_all_models_raw()
+        if cls.models_cache is None or was_refreshed:
+            filtered = shared.filter_models_by_output(raw, "text")
+            cls.models_cache = filtered if filtered else [
+                "error_fetching_models", "google/gemma-3-27b-it",
+                "openai/gpt-4o", "anthropic/claude-3.5-sonnet"
+            ]
+        return cls.models_cache
 
     def validate_temperature(self, temperature):
         """
         Validates and converts temperature value to float within acceptable range.
         """
-        try:
-            temp = float(temperature)
-            return max(0.0, min(2.0, temp))  # Clamp between 0.0 and 2.0
-        except (ValueError, TypeError):
-            return 1.0  # Return default if conversion fails
+        return shared.validate_temperature(temperature)
 
     def validate_request_timeout(self, request_timeout):
         """
         Validates and converts request timeout to seconds within an acceptable range.
         """
-        try:
-            timeout = int(request_timeout)
-            return max(self.min_request_timeout, min(self.max_request_timeout, timeout))
-        except (ValueError, TypeError):
-            return self.default_request_timeout
+        return shared.validate_request_timeout(
+            request_timeout,
+            self.min_request_timeout,
+            self.max_request_timeout,
+            self.default_request_timeout,
+        )
 
     @classmethod
     def validate_reasoning_effort(cls, reasoning_effort):
@@ -191,11 +141,11 @@ class OpenRouterNode:
         Validates OpenRouter reasoning effort. "auto" means do not send a
         reasoning override and let OpenRouter/model defaults apply.
         """
-        if isinstance(reasoning_effort, str):
-            normalized_effort = reasoning_effort.strip().lower()
-            if normalized_effort in cls.reasoning_effort_options:
-                return normalized_effort
-        return cls.default_reasoning_effort
+        return shared.validate_reasoning_effort(
+            reasoning_effort,
+            cls.reasoning_effort_options,
+            cls.default_reasoning_effort,
+        )
 
     def fetch_credits(self, api_key, timeout=None):
         """
@@ -204,41 +154,8 @@ class OpenRouterNode:
         """
         api_key = self.get_api_key(api_key)
         if not api_key:
-             return "API Key not provided."
-
-        url = "https://openrouter.ai/api/v1/credits"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/yourusername/comfyui-openrouter",
-            "X-Title": "ComfyUI OpenRouter LLM Node",
-        }
-
-        try:
-            validated_timeout = self.validate_request_timeout(timeout)
-            response = requests.get(url, headers=headers, timeout=validated_timeout)
-            response.raise_for_status()
-
-            result = response.json()
-            # Check if 'data' and expected keys exist
-            if "data" in result and "total_credits" in result["data"] and "total_usage" in result["data"]:
-                total_credits = result["data"]["total_credits"]
-                total_usage = result["data"]["total_usage"]
-                remaining = total_credits - total_usage
-                credits_text = f"Remaining: ${remaining:.3f}"
-            else:
-                credits_text = "Could not parse credit data from response."
-
-            return credits_text
-
-        except requests.exceptions.RequestException as e:
-            # Provide more context about the error
-            error_message = f"Error fetching credits: {str(e)}"
-            if hasattr(e, 'response') and e.response is not None:
-                 error_message += f" | Status Code: {e.response.status_code} | Response: {e.response.text[:200]}" # Log part of response
-            return error_message
-        except json.JSONDecodeError:
-             return "Error fetching credits: Could not decode JSON response."
+            return "API Key not provided."
+        return shared.fetch_credits(api_key, timeout)
 
     def generate_response(self, api_key, system_prompt, user_message_box, model,
                          web_search, cheapest, fastest, temperature, pdf_engine, chat_mode,
@@ -256,20 +173,15 @@ class OpenRouterNode:
         """
         # Create empty placeholder image
         placeholder_image = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
-        
+
         # Resolve API key
         api_key = self.get_api_key(api_key)
-        
-        if not api_key:
-             return ("Error: API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json", placeholder_image, "Stats N/A", "Credits N/A")
 
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/yourusername/comfyui-openrouter",
-            "X-Title": "ComfyUI OpenRouter LLM Node",
-        }
+        if not api_key:
+            return ("Error: API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json", placeholder_image, "Stats N/A", "Credits N/A")
+
+        url = f"{shared.BASE_URL}/chat/completions"
+        headers = shared.build_standard_headers(api_key)
 
         # Validate and convert temperature
         validated_temp = self.validate_temperature(temperature)
@@ -281,12 +193,12 @@ class OpenRouterNode:
 
         # Initialize session_path
         session_path = None
-        
+
         # Handle chat mode
         if chat_mode:
             # Get or create a chat session
             session_path, messages = self.chat_manager.get_or_create_session(user_text, system_prompt)
-            
+
             # Check if we need to update the system prompt (for existing sessions)
             if messages and messages[0]["role"] == "system" and messages[0]["content"] != system_prompt:
                 # Update system prompt if it has changed
@@ -308,9 +220,9 @@ class OpenRouterNode:
 
         # 2. Add Image parts (optional) - support multiple images from kwargs
         # Process all image_N inputs from kwargs
-        image_keys = sorted([k for k in kwargs.keys() if k.startswith('image_')], 
+        image_keys = sorted([k for k in kwargs.keys() if k.startswith('image_')],
                            key=lambda x: int(x.split('_')[1]))
-        
+
         for image_key in image_keys:
             if kwargs[image_key] is not None:
                 try:
@@ -326,14 +238,14 @@ class OpenRouterNode:
                     return (f"Error processing {image_key}: {e}", placeholder_image, "Stats N/A", "Credits N/A")
 
         # 3. Add PDF part (optional)
-        pdf_filename = "document.pdf" # Default filename if not provided
+        pdf_filename = "document.pdf"  # Default filename if not provided
         if pdf_data is not None:
             # Validate pdf_data structure (expecting dict with 'filename' and 'bytes')
             if isinstance(pdf_data, dict) and "bytes" in pdf_data and isinstance(pdf_data["bytes"], bytes):
                 pdf_bytes = pdf_data["bytes"]
                 # Use provided filename if available and valid, otherwise use default
                 if "filename" in pdf_data and isinstance(pdf_data["filename"], str) and pdf_data["filename"].strip():
-                     pdf_filename = pdf_data["filename"]
+                    pdf_filename = pdf_data["filename"]
 
                 try:
                     base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
@@ -351,15 +263,12 @@ class OpenRouterNode:
             else:
                 # Handle case where pdf_data is not in the expected format
                 print(f"Warning: pdf_data input is not in the expected format (dict with 'filename' and 'bytes'). PDF not included.")
-                # Optionally return an error or just proceed without the PDF
-                # return ("Error: Invalid PDF data format.", "Stats N/A", "Credits N/A")
-
 
         # Determine message format based on content type
         # Use simple string format for text-only requests to ensure compatibility
         # Use structured format only when we have multimodal content
         has_multimodal_content = len(user_content_blocks) > 1 or any(block.get("type") != "text" for block in user_content_blocks)
-        
+
         if has_multimodal_content:
             # Use structured format for multimodal content
             new_user_message = {
@@ -372,7 +281,7 @@ class OpenRouterNode:
                 "role": "user",
                 "content": user_text
             }
-        
+
         if chat_mode:
             # In chat mode, append to existing conversation (but don't save yet - wait for response)
             messages.append(new_user_message)
@@ -381,16 +290,7 @@ class OpenRouterNode:
             messages.append(new_user_message)
 
         # --- Apply model modifiers ---
-        modified_model = model
-        # Check if model already has modifiers to avoid duplication
-        if web_search and ":online" not in modified_model:
-            modified_model = f"{modified_model}:online"
-        if ":online" not in modified_model:
-             if cheapest and ":floor" not in modified_model:
-                 modified_model = f"{modified_model}:floor"
-             elif fastest and not cheapest and ":nitro" not in modified_model:
-                 modified_model = f"{modified_model}:nitro"
-
+        modified_model = shared.apply_model_modifiers(model, web_search, cheapest, fastest)
 
         # --- Construct the final payload ---
         data = {
@@ -406,30 +306,27 @@ class OpenRouterNode:
 
         # Add plugins if a specific PDF engine is selected
         if pdf_engine != "auto":
-             data["plugins"] = [
-                 {
-                     "id": "file-parser",
-                     "pdf": {
-                         "engine": pdf_engine
-                     }
-                 }
-             ]
+            data["plugins"] = [
+                {
+                    "id": "file-parser",
+                    "pdf": {
+                        "engine": pdf_engine
+                    }
+                }
+            ]
 
         # --- Pre-calculate text input tokens (rough estimate) ---
-        # Note: Actual token count depends on the model and includes parsed PDF/image data.
-        # Rely on the API response for accurate usage stats.
         text_token_estimate = 0
         try:
             text_token_estimate = self.count_tokens(system_prompt, model) + self.count_tokens(user_text, model)
         except Exception as e:
             print(f"Warning: Token counting failed - {e}")
 
-
         # --- Make API Call and Process Response ---
         try:
             start_time = time.time()
             response = requests.post(url, headers=headers, json=data, timeout=validated_timeout)
-            response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
+            response.raise_for_status()
             end_time = time.time()
 
             result = response.json()
@@ -439,7 +336,7 @@ class OpenRouterNode:
 
             # --- Extract results and calculate stats ---
             if not result.get("choices") or not result["choices"][0].get("message"):
-                 raise ValueError("Invalid response format from API: 'choices' or 'message' missing.")
+                raise ValueError("Invalid response format from API: 'choices' or 'message' missing.")
 
             # Parse response for text and image content
             message = result["choices"][0]["message"]
@@ -453,7 +350,7 @@ class OpenRouterNode:
                     # Get the first image from the images array
                     first_image = message["images"][0]
                     image_url = first_image["image_url"]["url"]
-                    
+
                     if image_url.startswith("data:image"):
                         base64_str = image_url.split(",", 1)[1]
                         try:
@@ -468,7 +365,7 @@ class OpenRouterNode:
                     print(f"Error processing images from response: {e}")
             else:
                 print("No images found in API response - this may be normal if the model doesn't support image generation or the prompt didn't request an image")
-            
+
             # Also handle legacy multimodal content format as fallback
             if isinstance(text_output, list):
                 text_parts = []
@@ -490,14 +387,13 @@ class OpenRouterNode:
 
             response_ms = result.get("response_ms", None)
             api_usage = result.get("usage", {})
-            prompt_tokens = api_usage.get("prompt_tokens", text_token_estimate) # Use API value if available
+            prompt_tokens = api_usage.get("prompt_tokens", text_token_estimate)
             completion_tokens = api_usage.get("completion_tokens", 0)
-            if completion_tokens == 0 and text_output: # Estimate completion tokens if API doesn't provide them
-                 try:
-                     completion_tokens = self.count_tokens(text_output, model)
-                 except Exception as e:
-                     print(f"Warning: Completion token counting failed - {e}")
-
+            if completion_tokens == 0 and text_output:
+                try:
+                    completion_tokens = self.count_tokens(text_output, model)
+                except Exception as e:
+                    print(f"Warning: Completion token counting failed - {e}")
 
             # Calculate tokens per second (TPS)
             tps = 0
@@ -507,24 +403,18 @@ class OpenRouterNode:
                 if server_elapsed_time > 0:
                     tps = completion_tokens / server_elapsed_time
             elif elapsed_time > 0:
-                # Use client-side timing as fallback, less accurate due to network latency
-                 tps = completion_tokens / elapsed_time
-                 # Optional: apply a heuristic correction factor if needed, but server time is better
-                 # correction_factor = 1.28 # Example factor, might need tuning
-                 # tps *= correction_factor
+                tps = completion_tokens / elapsed_time
 
-            stats_text = (
-                f"TPS: {tps:.2f}, "
-                f"Prompt Tokens: {prompt_tokens}, "
-                f"Completion Tokens: {completion_tokens}, "
-                f"Temp: {validated_temp:.1f}, "
-                f"Model: {modified_model}" # Display the actual model used
-            )
+            extra_parts = []
             if pdf_engine != "auto":
-                 stats_text += f", PDF Engine: {pdf_engine}"
+                extra_parts.append(f"PDF Engine: {pdf_engine}")
             if validated_reasoning_effort != "auto":
-                 stats_text += f", Reasoning: {validated_reasoning_effort}"
+                extra_parts.append(f"Reasoning: {validated_reasoning_effort}")
 
+            stats_text = shared.build_stats_text(
+                tps, prompt_tokens, completion_tokens, validated_temp, modified_model,
+                extra_parts if extra_parts else None
+            )
 
             # Fetch credits information AFTER the main request
             credits_text = self.fetch_credits(api_key, timeout=validated_timeout)
@@ -537,7 +427,7 @@ class OpenRouterNode:
                     "content": text_output
                 }
                 messages.append(assistant_message)
-                
+
                 # Save the updated conversation
                 self.chat_manager.save_conversation(session_path, messages)
 
@@ -552,12 +442,12 @@ class OpenRouterNode:
                 except json.JSONDecodeError:
                     error_message += f" | Status: {e.response.status_code} | Response: {e.response.text[:200]}"
             else:
-                 error_message += " (Network or connection issue)"
+                error_message += " (Network or connection issue)"
             print(f"ERROR: {error_message}")
             return (error_message, placeholder_image, "Stats N/A due to error", "Credits N/A due to error")
         except Exception as e:
-             print(f"ERROR: Node Error: {str(e)}")
-             return (f"Node Error: {str(e)}", placeholder_image, "Stats N/A due to error", "Credits N/A due to error")
+            print(f"ERROR: Node Error: {str(e)}")
+            return (f"Node Error: {str(e)}", placeholder_image, "Stats N/A due to error", "Credits N/A due to error")
 
     @staticmethod
     def image_to_base64(image):
@@ -565,35 +455,7 @@ class OpenRouterNode:
         Converts a ComfyUI IMAGE (torch.Tensor, BHWC, float 0-1)
         into a base64-encoded PNG string.
         """
-        if not isinstance(image, torch.Tensor):
-            raise TypeError("Input 'image' is not a torch.Tensor")
-
-        # Remove batch dimension if present
-        if image.ndim == 4:
-            if image.shape[0] != 1:
-                 print(f"Warning: Image batch size is {image.shape[0]}, using only the first image.")
-            image = image.squeeze(0) # Shape HWC
-
-        if image.ndim != 3:
-             raise ValueError(f"Unexpected image dimensions: {image.shape}. Expected HWC.")
-
-        # Convert float tensor (0-1) to numpy array (0-255, uint8)
-        image_np = image.cpu().numpy()
-        if image_np.dtype != np.uint8:
-             if image_np.min() < 0 or image_np.max() > 1:
-                  print("Warning: Image tensor values outside [0, 1] range. Clamping.")
-                  image_np = np.clip(image_np, 0, 1)
-             image_np = (image_np * 255).astype(np.uint8)
-
-        # Convert numpy array to PIL Image
-        pil_image = Image.fromarray(image_np, 'RGB') # Assuming RGB, adjust if needed
-
-        # Save PIL Image to a bytes buffer as PNG
-        buffered = io.BytesIO()
-        pil_image.save(buffered, format="PNG")
-
-        # Encode the bytes buffer to base64 string
-        return base64.b64encode(buffered.getvalue()).decode('utf-8')
+        return shared.image_to_base64(image)
 
     @staticmethod
     def base64_to_image(base64_str: str) -> torch.Tensor:
@@ -601,69 +463,15 @@ class OpenRouterNode:
         Converts a base64 image string to a ComfyUI image tensor
         Returns tensor in [1, H, W, 3] format with values in [0, 1]
         """
-        try:
-            # Decode base64 string to image
-            img_data = base64.b64decode(base64_str)
-            img = Image.open(io.BytesIO(img_data))
-            img = img.convert("RGB")
-
-            # Convert to numpy array and normalize to [0, 1]
-            img_array = np.array(img).astype(np.float32) / 255.0
-            
-            # Add batch dimension: [1, H, W, 3]
-            img_tensor = torch.from_numpy(img_array).unsqueeze(0)
-            
-            print(f"Successfully converted base64 to image tensor: {img_tensor.shape}")
-            return img_tensor
-            
-        except Exception as e:
-            print(f"Error in base64_to_image: {e}")
-            # Return a small placeholder image instead of failing
-            return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+        return shared.base64_to_image(base64_str)
 
     @staticmethod
     def count_tokens(text, model):
         """
         Count tokens for a given text using tiktoken.
         Uses model-specific encodings where possible, falls back to cl100k_base.
-        Handles potential errors during encoding.
         """
-        if not text or not isinstance(text, str):
-            return 0
-
-        # Strip any model modifiers like :floor, :nitro, :online
-        base_model = model.split(':')[0] if ':' in model else model
-
-        # Simplified mapping, cl100k_base is common for many recent models
-        encoding_name = "cl100k_base"
-        try:
-            # List known models/prefixes that definitely use cl100k_base
-            # Add others if known, but cl100k_base is a safe default for many
-            cl100k_models = [
-                "openai/gpt-4", "openai/gpt-3.5", "openai/gpt-4o",
-                "anthropic/claude",
-                "google/gemini",
-                "meta-llama/llama-2", "meta-llama/llama-3",
-                "mistralai/mistral", "mistralai/mixtral",
-            ]
-            # Check if the base_model or its prefix matches known cl100k models
-            is_cl100k = any(base_model.startswith(prefix) for prefix in cl100k_models)
-
-            if is_cl100k:
-                 encoding_name = "cl100k_base"
-            # else: # Add logic for other encodings if needed, e.g., p50k_base for older models
-            #    pass # Stick with cl100k_base as default for now
-
-            encoding = tiktoken.get_encoding(encoding_name)
-            token_count = len(encoding.encode(text, disallowed_special=())) # Allow special tokens
-            return token_count
-
-        except Exception as e:
-            print(f"Warning: Tiktoken error for model '{model}' (base: '{base_model}', encoding: '{encoding_name}'): {e}. Falling back to estimation.")
-            # Fallback: Estimate tokens based on characters (rough approximation)
-            # Average ~4 chars per token is a common heuristic
-            return max(1, round(len(text) / 4))
-
+        return shared.count_tokens(text, model)
 
     @classmethod
     def IS_CHANGED(cls, api_key, system_prompt, user_message_box, model,
@@ -676,9 +484,9 @@ class OpenRouterNode:
         """
         # Hash image data if present - handle multiple images from kwargs
         image_hashes = []
-        image_keys = sorted([k for k in kwargs.keys() if k.startswith('image_')], 
+        image_keys = sorted([k for k in kwargs.keys() if k.startswith('image_')],
                            key=lambda x: int(x.split('_')[1]))
-        
+
         for image_key in image_keys:
             if kwargs[image_key] is not None:
                 image = kwargs[image_key]
@@ -693,25 +501,20 @@ class OpenRouterNode:
                 else:
                     image_hashes.append(None)
 
-
         # Hash PDF data if present and valid
         pdf_hash = None
         if pdf_data is not None and isinstance(pdf_data, dict) and "bytes" in pdf_data and isinstance(pdf_data["bytes"], bytes):
-             try:
-                 hasher = hashlib.sha256()
-                 hasher.update(pdf_data["bytes"])
-                 pdf_hash = hasher.hexdigest()
-                 # Optionally include filename in hash if it affects processing?
-                 # if "filename" in pdf_data: hasher.update(pdf_data["filename"].encode())
-             except Exception as e:
-                 print(f"Warning: Could not hash pdf data for IS_CHANGED: {e}")
-                 pdf_hash = "pdf_hashing_error" # Use a placeholder on error
+            try:
+                hasher = hashlib.sha256()
+                hasher.update(pdf_data["bytes"])
+                pdf_hash = hasher.hexdigest()
+            except Exception as e:
+                print(f"Warning: Could not hash pdf data for IS_CHANGED: {e}")
+                pdf_hash = "pdf_hashing_error"
         elif pdf_data is not None:
-             # Handle cases where pdf_data is present but not in the expected format
-             pdf_hash = "invalid_pdf_data_format"
+            pdf_hash = "invalid_pdf_data_format"
 
-
-        # Ensure temperature is consistently represented (e.g., as float)
+        # Ensure temperature is consistently represented
         try:
             temp_float = float(temperature) if isinstance(temperature, (str, int, float)) else 1.0
             temp_float = max(0.0, min(2.0, temp_float))
@@ -726,9 +529,7 @@ class OpenRouterNode:
 
         validated_reasoning_effort = cls.validate_reasoning_effort(reasoning_effort)
 
-
         # Combine all relevant inputs into a tuple for comparison
-        # Use primitive types where possible for reliable hashing/comparison
         # Note: api_key here is the UI value only. Keys resolved from the LLM_KEY
         # env var or openrouter_api_key.json are intentionally NOT part of the
         # cache key — they're treated as user environment, not workflow inputs.
@@ -737,6 +538,7 @@ class OpenRouterNode:
                 timeout_int, aspect_ratio, image_resolution, seed, validated_reasoning_effort,
                 tuple(image_hashes), pdf_hash, user_message_input)
 
+
 # Node class mappings
 NODE_CLASS_MAPPINGS = {
     "OpenRouterNode": OpenRouterNode
@@ -744,5 +546,5 @@ NODE_CLASS_MAPPINGS = {
 
 # Node display name mappings
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "OpenRouterNode": "OpenRouter LLM Node (Text/Multi-Image/PDF/Chat)" # Updated name
+    "OpenRouterNode": "OpenRouter LLM Node (Text/Multi-Image/PDF/Chat)"
 }

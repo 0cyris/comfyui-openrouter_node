@@ -1,6 +1,7 @@
 /**
- * Dynamic image inputs for OpenRouter Node
- * Based on cozy_ex_dynamic pattern for clean dynamic inputs
+ * Dynamic image inputs for OpenRouter Nodes
+ * Handles dynamic image_N slot management for both the text LLM node
+ * and the image generation node.
  */
 
 import { app } from "../../../scripts/app.js"
@@ -15,37 +16,44 @@ const TypeSlotEvent = {
     Disconnect: false,
 };
 
-const NODE_ID = "OpenRouterNode";
+// Node types that get dynamic image input slots
+const DYNAMIC_IMAGE_NODE_IDS = new Set([
+    "OpenRouterNode",
+    "OpenRouterImageGenNode",
+]);
+
 const PREFIX = "image";
 const TYPE = "IMAGE";
 
 app.registerExtension({
     name: 'OpenRouter.DynamicImageInputs',
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
-        // Skip if not our node
-        if (nodeData.name !== NODE_ID) {
+        // Skip if not one of our nodes
+        if (!DYNAMIC_IMAGE_NODE_IDS.has(nodeData.name)) {
             return
         }
 
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const me = onNodeCreated?.apply(this);
-            
-            // Find api_key widget and update label with security warning
-            const apiKeyWidget = this.widgets?.find(w => w.name === "api_key");
-            if (apiKeyWidget) {
-                apiKeyWidget.label = "api_key (Leave blank for secure loading)";
+
+            // api_key security label — only on the text LLM node
+            if (nodeData.name === "OpenRouterNode") {
+                const apiKeyWidget = this.widgets?.find(w => w.name === "api_key");
+                if (apiKeyWidget) {
+                    apiKeyWidget.label = "api_key (Leave blank for secure loading)";
+                }
             }
 
-            // Start with a new dynamic input - exactly like cozy example
+            // Start with a new dynamic input slot
             this.addInput(PREFIX, TYPE);
-            
+
             // Ensure the new slot has proper appearance
             const slot = this.inputs[this.inputs.length - 1];
             if (slot) {
                 slot.color_off = "#666";
             }
-            
+
             return me;
         }
 
@@ -58,7 +66,7 @@ app.registerExtension({
                 if (node_slot && !node_slot.name.startsWith(PREFIX)) {
                     return me;
                 }
-                
+
                 if (link_info && event === TypeSlotEvent.Connect) {
                     // Get the parent (left side node) from the link
                     const fromNode = this.graph._nodes.find(
@@ -81,14 +89,14 @@ app.registerExtension({
                 let idx = 0;
                 let slot_tracker = {};
                 let toRemove = [];
-                
+
                 for(const slot of this.inputs) {
                     // Skip non-image inputs
                     if (!slot.name.startsWith(PREFIX)) {
                         idx += 1;
                         continue;
                     }
-                    
+
                     // Mark empty image slots for removal (except the last one)
                     if (slot.link === null && idx < this.inputs.length - 1) {
                         toRemove.push(idx);
@@ -101,7 +109,7 @@ app.registerExtension({
                     }
                     idx += 1;
                 }
-                
+
                 // Remove empty slots from highest index to lowest
                 toRemove.reverse();
                 for(const removeIdx of toRemove) {
@@ -116,7 +124,7 @@ app.registerExtension({
                         break;
                     }
                 }
-                
+
                 // If there's no empty image slot at the end, or no image slots at all, add one
                 if (!lastInput || lastInput.link !== null) {
                     this.addInput(PREFIX, TYPE);
@@ -132,7 +140,7 @@ app.registerExtension({
                 return me;
             }
         }
-        
+
         return nodeType;
     },
 })

@@ -57,10 +57,25 @@ def load_node_module():
     package.__path__ = [str(root)]
     sys.modules[package_name] = package
 
+    # Load openrouter_shared explicitly first so that both it and node.py
+    # capture the same (freshly stubbed) requests module object.
+    shared_spec = importlib.util.spec_from_file_location(
+        f"{package_name}.openrouter_shared",
+        root / "openrouter_shared.py",
+        submodule_search_locations=[str(root)],
+    )
+    shared_module = importlib.util.module_from_spec(shared_spec)
+    sys.modules[shared_spec.name] = shared_module
+    shared_spec.loader.exec_module(shared_module)
+
+    # Do NOT pass submodule_search_locations here. Doing so makes Python treat
+    # node.py as a package (setting __package__ = "…node" instead of "…"),
+    # which causes `from . import openrouter_shared` to resolve to
+    # "…node.openrouter_shared" (a stale cached module) instead of
+    # "…openrouter_shared" (the fresh one we injected above).
     spec = importlib.util.spec_from_file_location(
         f"{package_name}.node",
         root / "node.py",
-        submodule_search_locations=[str(root)],
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
