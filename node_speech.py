@@ -212,14 +212,38 @@ class OpenRouterSpeechNode:
             return (audio_dict, stats, credits)
 
         except requests.exceptions.RequestException as e:
-            error_msg = f"API Request Error: {str(e)}"
+            status = None
+            detail = ""
             if hasattr(e, "response") and e.response is not None:
+                status = e.response.status_code
                 try:
-                    error_msg += f" | Details: {e.response.json()}"
+                    detail = f" | Details: {e.response.json()}"
                 except (json.JSONDecodeError, Exception):
-                    error_msg += f" | Status: {e.response.status_code}"
+                    detail = f" | HTTP {status}"
             else:
-                error_msg += " (Network or connection issue)"
+                detail = " (Network or connection issue)"
+
+            error_msg = f"API Request Error: {str(e)}{detail}"
+
+            # Surface actionable guidance for the most common failures.
+            # Not all models listed by ?output_modalities=speech are compatible
+            # with the /audio/speech endpoint — some (e.g. Gemini TTS, Voxtral)
+            # use a different underlying API and will fail here.
+            if status == 404:
+                error_msg += (
+                    f"\n\nModel '{model}' is not available via /audio/speech. "
+                    "It may use a different API format (e.g. streaming chat completions). "
+                    "Known-working alternatives: openai/tts-1, openai/tts-1-hd, "
+                    "elevenlabs/eleven-turbo-v2"
+                )
+            elif status == 500:
+                error_msg += (
+                    f"\n\nModel '{model}' returned a server error from /audio/speech. "
+                    "It may not implement the OpenAI-compatible TTS format. "
+                    "Known-working alternatives: openai/tts-1, openai/tts-1-hd, "
+                    "elevenlabs/eleven-turbo-v2"
+                )
+
             print(f"[SpeechNode] ERROR: {error_msg}")
             return (silent, "Stats N/A due to error", error_msg)
         except Exception as e:
