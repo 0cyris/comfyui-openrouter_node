@@ -1,22 +1,30 @@
 """
-node_audio.py — OpenRouter Audio Generation Node
+node_audio.py — OpenRouter Audio (TTS) Node
 
-Targets audio-output models on OpenRouter (e.g. OpenAI TTS via OpenRouter).
-Accepts a text prompt with voice and format selection; outputs an AUDIO tensor.
-The model dropdown is filtered to models whose output modality includes "audio".
+Targets text-to-speech models on OpenRouter via the dedicated
+/v1/audio/speech endpoint (OpenAI-compatible TTS API).
+
+Request fields:
+  input           — text to synthesise
+  model           — TTS model ID (e.g. openai/tts-1, elevenlabs/…)
+  voice           — speaker preset
+  response_format — audio container / codec
+  speed           — optional playback rate
+
+Response: application/octet-stream — raw audio bytes decoded into an
+          ComfyUI AUDIO dict {"waveform": Tensor[1,C,N], "sample_rate": int}.
 """
 
 import requests
 import json
 import time
-import base64
 import torch
 from . import openrouter_shared as shared
 
 
 class OpenRouterAudioNode:
     """
-    ComfyUI node for audio generation via OpenRouter.
+    ComfyUI node for text-to-speech via OpenRouter's /v1/audio/speech endpoint.
 
     Filters the model list to audio-output models only.
     Returns three outputs:
@@ -33,9 +41,10 @@ class OpenRouterAudioNode:
     max_request_timeout = shared.MAX_REQUEST_TIMEOUT
 
     _fallback_models = [
-        "error_fetching_models",
         "openai/tts-1",
         "openai/tts-1-hd",
+        "elevenlabs/eleven-turbo-v2",
+        "elevenlabs/eleven-multilingual-v2",
     ]
 
     @classmethod
@@ -53,6 +62,13 @@ class OpenRouterAudioNode:
                 "model": (cls.fetch_openrouter_models(),),
                 "voice": (list(shared.VOICE_OPTIONS), {"default": "alloy"}),
                 "output_format": (list(shared.AUDIO_FORMAT_OPTIONS), {"default": "mp3"}),
+                "speed": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.25,
+                    "max": 4.0,
+                    "step": 0.05,
+                    "display": "number",
+                }),
                 "request_timeout": ("INT", {
                     "default": cls.default_request_timeout,
                     "min": cls.min_request_timeout,
@@ -76,6 +92,7 @@ class OpenRouterAudioNode:
     def fetch_openrouter_models(cls):
         """
         Fetches audio-output model IDs from the OpenRouter API, with caching.
+        Falls back to a hardcoded list of known TTS models if none are found.
         """
         raw, was_refreshed = shared.fetch_all_models_raw()
         if cls.models_cache is None or was_refreshed:
@@ -91,20 +108,25 @@ class OpenRouterAudioNode:
         }
 
     def generate_audio(self, api_key, prompt, model,
-                       voice="alloy", output_format="mp3",
+                       voice="alloy", output_format="mp3", speed=1.0,
                        request_timeout=120, prompt_input=None):
         """
-        Sends an audio generation request to OpenRouter.
+        Calls POST /v1/audio/speech on OpenRouter.
 
-        Handles two response shapes:
-        - JSON envelope with choices[0].message.audio.data (base64)
-        - Raw binary audio body (non-JSON Content-Type)
+        The TTS endpoint accepts:
+          input           — text to synthesise
+          model           — TTS model slug
+          voice           — speaker preset
+          response_format — desired audio format
+          speed           — playback rate (0.25–4.0)
+
+        The response body is raw audio bytes (application/octet-stream).
 
         Returns (audio_dict, stats_str, credits_str).
         """
         silent = self._silent_audio()
 
-        # Resolve API key and prompt
+        # Resolve API key
         api_key = shared.get_api_key(api_key)
         if not api_key:
             return (
@@ -122,86 +144,50 @@ class OpenRouterAudioNode:
             request_timeout, self.min_request_timeout,
             self.max_request_timeout, self.default_request_timeout
         )
-        headers = shared.build_standard_headers(api_key)
-        url = f"{shared.BASE_URL}/chat/completions"
 
-        # OpenAI audio-in-chat-completions format:
-        #   "modalities": ["text", "audio"]
-        #   "audio": {"voice": "...", "format": "..."}
-        # Note: top-level "response_format" is for JSON-mode text output and must
-        # be an object ({type: ...}), not a string — don't use it for audio format.
+        # Clamp speed to documented range
+        try:
+            speed_f = float(speed)
+            speed_f = max(0.25, min(4.0, speed_f))
+        except (ValueError, TypeError):
+            speed_f = 1.0
+
+        headers = shared.build_standard_headers(api_key)
+        url = f"{shared.BASE_URL}/audio/speech"
+
         data = {
             "model": model,
-            "modalities": ["text", "audio"],
-            "audio": {
-                "voice": voice,
-                "format": output_format,
-            },
-            "messages": [{"role": "user", "content": effective_prompt}],
+            "input": effective_prompt,
+            "voice": voice,
+            "response_format": output_format,
+            "speed": speed_f,
         }
 
         try:
             start_time = time.time()
-            response = requests.post(url, headers=headers, json=data, timeout=validated_timeout)
+            response = requests.post(
+                url, headers=headers, json=data, timeout=validated_timeout
+            )
             response.raise_for_status()
-            end_time = time.time()
-            elapsed = end_time - start_time
+            elapsed = time.time() - start_time
 
-            content_type = response.headers.get("Content-Type", "")
+            audio_bytes = response.content
+            if not audio_bytes:
+                return (silent, "Stats N/A", "Empty audio response body.")
 
-            if "application/json" in content_type:
-                # JSON envelope — look for audio in choices[0].message.audio.data
-                result = response.json()
-                debug_str = json.dumps(result, default=str)
-                print(f"[AudioNode] API response ({len(debug_str)} chars): {debug_str[:500]}")
+            print(
+                f"[AudioNode] Received {len(audio_bytes)} bytes "
+                f"in {elapsed:.2f}s (format={output_format})"
+            )
 
-                audio_b64 = None
-                choices = result.get("choices", [])
-                if choices:
-                    msg = choices[0].get("message", {})
-                    audio_obj = msg.get("audio", {})
-                    audio_b64 = audio_obj.get("data")
+            audio_dict = shared.decode_audio_bytes(audio_bytes, output_format)
 
-                if not audio_b64:
-                    error_msg = "No audio data found in JSON response."
-                    print(f"[AudioNode] {error_msg}")
-                    return (silent, "Stats N/A", error_msg)
-
-                try:
-                    audio_bytes = base64.b64decode(audio_b64)
-                except Exception as e:
-                    return (silent, "Stats N/A", f"Error decoding audio base64: {e}")
-
-                audio_dict = shared.decode_audio_bytes(audio_bytes, output_format)
-
-                api_usage = result.get("usage", {})
-                prompt_tokens = api_usage.get("prompt_tokens", 0)
-                completion_tokens = api_usage.get("completion_tokens", 0)
-                response_ms = result.get("response_ms")
-                if response_ms and response_ms > 0:
-                    tps = completion_tokens / (response_ms / 1000.0)
-                elif elapsed > 0:
-                    tps = completion_tokens / elapsed
-                else:
-                    tps = 0
-
-                stats = shared.build_stats_text(
-                    tps, prompt_tokens, completion_tokens, 0.0, model,
-                    extra_parts=[f"Format: {output_format}", f"Voice: {voice}"]
-                )
-
-            else:
-                # Raw binary audio response
-                audio_bytes = response.content
-                if not audio_bytes:
-                    return (silent, "Stats N/A", "Empty audio response body.")
-
-                audio_dict = shared.decode_audio_bytes(audio_bytes, output_format)
-                stats = (
-                    f"TPS: N/A, Prompt Tokens: N/A, Completion Tokens: N/A, "
-                    f"Temp: 0.0, Model: {model}, "
-                    f"Format: {output_format}, Voice: {voice}"
-                )
+            stats = (
+                f"TPS: N/A, Prompt Tokens: N/A, Completion Tokens: N/A, "
+                f"Temp: N/A, Model: {model}, "
+                f"Format: {output_format}, Voice: {voice}, Speed: {speed_f:.2f}, "
+                f"Elapsed: {elapsed:.2f}s"
+            )
 
             credits = shared.fetch_credits(api_key, validated_timeout)
             return (audio_dict, stats, credits)
@@ -211,7 +197,7 @@ class OpenRouterAudioNode:
             if hasattr(e, "response") and e.response is not None:
                 try:
                     error_msg += f" | Details: {e.response.json()}"
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, Exception):
                     error_msg += f" | Status: {e.response.status_code}"
             else:
                 error_msg += " (Network or connection issue)"
@@ -223,7 +209,7 @@ class OpenRouterAudioNode:
 
     @classmethod
     def IS_CHANGED(cls, api_key, prompt, model,
-                   voice="alloy", output_format="mp3",
+                   voice="alloy", output_format="mp3", speed=1.0,
                    request_timeout=120, prompt_input=None):
         """Check if any input that affects the output has changed."""
         try:
@@ -232,7 +218,12 @@ class OpenRouterAudioNode:
         except (ValueError, TypeError):
             timeout_int = cls.default_request_timeout
 
-        return (api_key, prompt, model, voice, output_format, timeout_int, prompt_input)
+        try:
+            speed_f = round(max(0.25, min(4.0, float(speed))), 4)
+        except (ValueError, TypeError):
+            speed_f = 1.0
+
+        return (api_key, prompt, model, voice, output_format, speed_f, timeout_int, prompt_input)
 
 
 NODE_CLASS_MAPPINGS = {
