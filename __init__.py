@@ -2,9 +2,10 @@ from .node import NODE_CLASS_MAPPINGS as _T, NODE_DISPLAY_NAME_MAPPINGS as _TN
 from .node_image_gen import NODE_CLASS_MAPPINGS as _I, NODE_DISPLAY_NAME_MAPPINGS as _IN
 from .node_speech import NODE_CLASS_MAPPINGS as _S, NODE_DISPLAY_NAME_MAPPINGS as _SN
 from .node_transcription import NODE_CLASS_MAPPINGS as _TR, NODE_DISPLAY_NAME_MAPPINGS as _TRN
+from .node_rerank import NODE_CLASS_MAPPINGS as _RR, NODE_DISPLAY_NAME_MAPPINGS as _RRN
 
-NODE_CLASS_MAPPINGS = {**_T, **_I, **_S, **_TR}
-NODE_DISPLAY_NAME_MAPPINGS = {**_TN, **_IN, **_SN, **_TRN}
+NODE_CLASS_MAPPINGS = {**_T, **_I, **_S, **_TR, **_RR}
+NODE_DISPLAY_NAME_MAPPINGS = {**_TN, **_IN, **_SN, **_TRN, **_RRN}
 
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
