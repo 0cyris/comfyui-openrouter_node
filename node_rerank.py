@@ -3,19 +3,24 @@ node_rerank.py — OpenRouter Rerank Node
 
 POST /api/v1/rerank
 
+Uses ComfyUI's native list mechanism:
+  INPUT_IS_LIST  = True         — documents arrives as list[str]; all other
+                                  scalar inputs arrive as list[T] and are
+                                  unwrapped with [0].
+  OUTPUT_IS_LIST = (True, True, False, False)
+                                — documents and scores go out as lists for
+                                  sequential downstream processing; Stats and
+                                  Credits are plain strings.
+
 Request:
-  model     — rerank model ID (e.g. cohere/rerank-v3.5)
+  model     — rerank model ID
   query     — search query string
   documents — list of document strings
   top_n     — optional; how many results to return (0 = all)
 
-Response:
-  results[].document.text    — original document text
-  results[].index            — original position in input list
-  results[].relevance_score  — float relevance score (higher = more relevant)
-
-Documents are passed in / returned as separator-delimited strings so they
-connect naturally to other ComfyUI text nodes.
+Response results[] (sorted by relevance, highest first):
+  document.text    — original document text
+  relevance_score  — float
 """
 
 import requests
@@ -24,29 +29,19 @@ import time
 from . import openrouter_shared as shared
 
 
-# Separator tokens used when splitting/joining document lists.
-# Key = display name shown in the dropdown.
-_SEPARATORS = {
-    "newline":        "\n",
-    "double newline": "\n\n",
-    "---":            "\n---\n",
-    "|||":            "|||",
-}
-
-
 class OpenRouterRerankNode:
     """
     ComfyUI node for document reranking via OpenRouter's /v1/rerank endpoint.
 
-    Takes a query and a list of documents (as a delimited string), calls the
-    rerank API, and returns the documents re-sorted by relevance.
-
     Returns four outputs:
-      1) "documents"  : re-ranked document texts joined by the chosen separator
-      2) "scores"     : relevance scores, one per line, matching document order
-      3) "Stats"      : timing, model, usage (tokens, search units, cost)
-      4) "Credits"    : remaining OpenRouter account balance
+      1) "documents" (list[STRING]) : re-ranked texts, highest relevance first
+      2) "scores"    (list[FLOAT])  : corresponding relevance scores
+      3) "Stats"     (STRING)       : timing, model, doc counts, cost
+      4) "Credits"   (STRING)       : remaining OpenRouter account balance
     """
+
+    INPUT_IS_LIST  = True
+    OUTPUT_IS_LIST = (True, True, False, False)
 
     models_cache = None
     last_fetch_time = 0
@@ -74,10 +69,8 @@ class OpenRouterRerankNode:
                     "multiline": False,
                     "default": ""
                 }),
-                "documents": ("STRING", {
-                    "multiline": True,
-                    "default": "Document one\nDocument two\nDocument three",
-                }),
+                # forceInput: documents must be wired from an upstream list node
+                "documents": ("STRING", {"forceInput": True}),
                 "model": (cls.fetch_openrouter_models(),),
                 # 0 = return all results; >0 = return only the top N
                 "top_n": ("INT", {
@@ -87,7 +80,6 @@ class OpenRouterRerankNode:
                     "step": 1,
                     "display": "number",
                 }),
-                "separator": (list(_SEPARATORS.keys()), {"default": "newline"}),
                 "request_timeout": ("INT", {
                     "default": cls.default_request_timeout,
                     "min": cls.min_request_timeout,
@@ -96,27 +88,18 @@ class OpenRouterRerankNode:
                     "display": "number",
                 }),
             },
-            "optional": {
-                # Wire another node's STRING output here to override the text area
-                "query_input":     ("STRING", {"forceInput": True}),
-                "documents_input": ("STRING", {"forceInput": True}),
-            },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("documents", "scores", "Stats", "Credits")
-
-    FUNCTION = "rerank"
-    CATEGORY = "LLM"
+    RETURN_TYPES  = ("STRING", "FLOAT",  "STRING", "STRING")
+    RETURN_NAMES  = ("documents", "scores", "Stats",  "Credits")
+    FUNCTION      = "rerank"
+    CATEGORY      = "LLM"
 
     @classmethod
     def fetch_openrouter_models(cls):
         """
-        Returns the list of rerank model IDs.
-
-        Rerank models live on a separate endpoint (/api/v1/rerank) and don't
-        appear in the output_modalities filter used by other nodes, so we
-        maintain our own hardcoded list with 1-hour caching.
+        Fetches rerank model IDs via GET /api/v1/models?supported_parameters=rerank.
+        Falls back to the hardcoded Cohere/Jina list on any error.
         """
         current_time = time.time()
         if cls.models_cache is None or (current_time - cls.last_fetch_time > cls.cache_duration):
@@ -138,55 +121,53 @@ class OpenRouterRerankNode:
         return cls.models_cache
 
     def rerank(self, api_key, query, documents, model,
-               top_n=0, separator="newline", request_timeout=120,
-               query_input=None, documents_input=None):
+               top_n, request_timeout):
         """
-        Splits the documents string into a list, calls POST /v1/rerank,
-        then returns the texts and scores re-sorted by relevance.
+        Calls POST /v1/rerank with the documents list and returns results
+        sorted by descending relevance.
 
-        Returns (ranked_docs_str, scores_str, stats_str, credits_str).
+        All parameters arrive as lists (INPUT_IS_LIST = True).
+        Scalars are unwrapped with [0]; `documents` is used as-is.
         """
-        api_key = shared.get_api_key(api_key)
-        if not api_key:
-            return (
-                "",
-                "",
-                "Stats N/A",
-                "Error: API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json",
-            )
+        # Unwrap scalar inputs
+        api_key_str      = api_key[0]       if isinstance(api_key, list)       else api_key
+        query_str        = query[0]         if isinstance(query, list)         else query
+        model_str        = model[0]         if isinstance(model, list)         else model
+        top_n_int        = top_n[0]         if isinstance(top_n, list)         else top_n
+        timeout_val      = request_timeout[0] if isinstance(request_timeout, list) else request_timeout
 
-        effective_query = (
-            query_input if query_input is not None and query_input.strip()
-            else query
-        )
-        if not effective_query or not effective_query.strip():
-            return ("", "", "Stats N/A", "Error: query is empty.")
+        # documents is the full list
+        doc_list = [d for d in (documents if isinstance(documents, list) else [documents])
+                    if d and d.strip()]
 
-        effective_docs_str = (
-            documents_input if documents_input is not None and documents_input.strip()
-            else documents
-        )
+        error_lists = ([], [], "Stats N/A", "")   # empty-list sentinel for list outputs
 
-        sep = _SEPARATORS.get(separator, "\n")
-        doc_list = [d for d in effective_docs_str.split(sep) if d.strip()]
+        api_key_str = shared.get_api_key(api_key_str)
+        if not api_key_str:
+            return ([], [], "Stats N/A",
+                    "Error: API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json")
+
+        if not query_str or not query_str.strip():
+            return ([], [], "Stats N/A", "Error: query is empty.")
+
         if not doc_list:
-            return ("", "", "Stats N/A", "Error: documents list is empty.")
+            return ([], [], "Stats N/A", "Error: documents list is empty.")
 
         validated_timeout = shared.validate_request_timeout(
-            request_timeout, self.min_request_timeout,
+            timeout_val, self.min_request_timeout,
             self.max_request_timeout, self.default_request_timeout
         )
 
-        headers = shared.build_standard_headers(api_key)
+        headers = shared.build_standard_headers(api_key_str)
         url = f"{shared.BASE_URL}/rerank"
 
         data = {
-            "model": model,
-            "query": effective_query.strip(),
+            "model": model_str,
+            "query": query_str.strip(),
             "documents": doc_list,
         }
-        if top_n and top_n > 0:
-            data["top_n"] = top_n
+        if top_n_int and top_n_int > 0:
+            data["top_n"] = top_n_int
 
         try:
             start_time = time.time()
@@ -196,33 +177,30 @@ class OpenRouterRerankNode:
             response.raise_for_status()
             elapsed = time.time() - start_time
 
-            result = response.json()
+            result  = response.json()
             results = result.get("results", [])
 
             if not results:
-                return ("", "", f"Model: {model}, Elapsed: {elapsed:.2f}s", "No results returned.")
+                return ([], [], f"Model: {model_str}, Elapsed: {elapsed:.2f}s — no results", "")
 
             # results are already sorted by relevance (highest first)
-            ranked_texts = [r["document"]["text"] for r in results]
-            ranked_scores = [r["relevance_score"] for r in results]
+            ranked_texts  = [r["document"]["text"]  for r in results]
+            ranked_scores = [float(r["relevance_score"]) for r in results]
 
-            docs_out = sep.join(ranked_texts)
-            scores_out = "\n".join(f"{s:.6f}" for s in ranked_scores)
-
-            usage = result.get("usage") or {}
+            usage        = result.get("usage") or {}
             total_tokens = usage.get("total_tokens", 0)
             search_units = usage.get("search_units", 0)
-            cost = usage.get("cost", 0.0)
+            cost         = usage.get("cost", 0.0)
 
             stats = (
-                f"Model: {model}, "
+                f"Model: {model_str}, "
                 f"Docs in: {len(doc_list)}, Docs out: {len(results)}, "
                 f"Total tokens: {total_tokens}, Search units: {search_units}, "
                 f"Cost: ${cost:.4f}, Elapsed: {elapsed:.2f}s"
             )
 
-            credits = shared.fetch_credits(api_key, validated_timeout)
-            return (docs_out, scores_out, stats, credits)
+            credits = shared.fetch_credits(api_key_str, validated_timeout)
+            return (ranked_texts, ranked_scores, stats, credits)
 
         except requests.exceptions.RequestException as e:
             status = None
@@ -237,26 +215,22 @@ class OpenRouterRerankNode:
                 detail = " (Network or connection issue)"
             error_msg = f"API Request Error: {str(e)}{detail}"
             print(f"[RerankNode] ERROR: {error_msg}")
-            return ("", "", "Stats N/A due to error", error_msg)
+            return ([], [], "Stats N/A due to error", error_msg)
         except Exception as e:
             print(f"[RerankNode] ERROR: {str(e)}")
-            return ("", "", "Stats N/A due to error", f"Node Error: {str(e)}")
+            return ([], [], "Stats N/A due to error", f"Node Error: {str(e)}")
 
     @classmethod
-    def IS_CHANGED(cls, api_key, query, documents, model,
-                   top_n=0, separator="newline", request_timeout=120,
-                   query_input=None, documents_input=None):
-        """Cache key covers all inputs that affect the rerank result."""
-        try:
-            timeout_int = int(request_timeout)
-            timeout_int = max(cls.min_request_timeout, min(cls.max_request_timeout, timeout_int))
-        except (ValueError, TypeError):
-            timeout_int = cls.default_request_timeout
+    def IS_CHANGED(cls, api_key, query, documents, model, top_n, request_timeout):
+        """IS_CHANGED also receives lists when INPUT_IS_LIST = True."""
+        def u(v):
+            return v[0] if isinstance(v, list) else v
 
-        effective_query = query_input if (query_input and query_input.strip()) else query
-        effective_docs  = documents_input if (documents_input and documents_input.strip()) else documents
-
-        return (api_key, model, effective_query, effective_docs, top_n, separator, timeout_int)
+        return (
+            u(api_key), u(query),
+            tuple(documents) if isinstance(documents, list) else documents,
+            u(model), u(top_n), u(request_timeout),
+        )
 
 
 NODE_CLASS_MAPPINGS = {
