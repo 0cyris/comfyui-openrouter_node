@@ -179,6 +179,33 @@ def filter_models_by_output(models, output_modality):
     return sorted(result)
 
 
+def filter_models_by_input(models, input_modality):
+    """
+    Filters model dicts to those whose input modality matches.
+
+    OpenRouter architecture.modality format: "input->output"
+    Examples: "audio->text" (Whisper), "text+audio->text" (multimodal)
+
+    Args:
+        models: list of model dicts from fetch_all_models_raw()
+        input_modality: "audio", "text", "image", etc.
+
+    Returns:
+        Sorted list of matching model ID strings.
+    """
+    result = []
+    for m in models:
+        arch = m.get("architecture", {})
+        modality_str = arch.get("modality", "")
+        if "->" in modality_str:
+            input_part = modality_str.split("->", 1)[0]
+        else:
+            input_part = modality_str
+        if input_modality in input_part:
+            result.append(m["id"])
+    return sorted(result)
+
+
 # ── Credits ───────────────────────────────────────────────────────────────────
 
 def fetch_credits(api_key, timeout=None):
@@ -399,6 +426,50 @@ def build_stats_text(tps, prompt_tokens, completion_tokens, validated_temp,
     if extra_parts:
         text += ", " + ", ".join(extra_parts)
     return text
+
+
+# ── Audio encoding ────────────────────────────────────────────────────────────
+
+def encode_audio_to_base64(audio_dict, fmt="wav"):
+    """
+    Encodes a ComfyUI AUDIO dict to a base64 string for the STT API.
+
+    audio_dict: {"waveform": Tensor[1, C, N], "sample_rate": int}
+    fmt: target container format.
+         "wav" always works (stdlib wave).
+         All other formats require torchaudio (torchcodec).
+
+    Returns: raw base64 string (NOT a data URI — OpenRouter wants plain base64).
+    Raises: RuntimeError if fmt != "wav" and torchaudio is unavailable.
+    """
+    waveform = audio_dict["waveform"]   # [1, C, N]
+    sample_rate = audio_dict["sample_rate"]
+
+    if waveform.ndim == 3:
+        waveform = waveform.squeeze(0)  # → [C, N]
+
+    buf = io.BytesIO()
+
+    if fmt == "wav":
+        import wave as _wave
+        wf_np = waveform.cpu().numpy()          # [C, N]
+        n_channels = wf_np.shape[0]
+        # [C, N] → [N, C] interleaved int16
+        pcm = np.clip(wf_np.T * 32767, -32768, 32767).astype(np.int16)
+        with _wave.open(buf, "wb") as wf:
+            wf.setnchannels(n_channels)
+            wf.setsampwidth(2)          # 16-bit
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm.tobytes())
+    elif _HAS_TORCHAUDIO:
+        _torchaudio.save(buf, waveform, sample_rate, format=fmt)
+    else:
+        raise RuntimeError(
+            f"torchaudio is required to encode audio as '{fmt}'. "
+            "Install torchcodec or select 'wav' as the audio_format."
+        )
+
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
 # ── Audio decoding ────────────────────────────────────────────────────────────
