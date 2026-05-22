@@ -85,12 +85,27 @@ class OpenRouterImageGenNode:
     @classmethod
     def fetch_openrouter_models(cls):
         """
-        Fetches image-output model IDs from the OpenRouter API, with caching.
+        Fetches image-output model IDs via GET /api/v1/models?output_modalities=image.
+
+        Falls back to the hardcoded list if the fetch fails or returns nothing.
         """
-        raw, was_refreshed = shared.fetch_all_models_raw()
-        if cls.models_cache is None or was_refreshed:
-            filtered = shared.filter_models_by_output(raw, "image")
-            cls.models_cache = filtered if filtered else cls._fallback_models[:]
+        current_time = time.time()
+        if cls.models_cache is None or (current_time - cls.last_fetch_time > cls.cache_duration):
+            try:
+                response = requests.get(
+                    f"{shared.BASE_URL}/models",
+                    params={"output_modalities": "image"},
+                    timeout=shared.DEFAULT_REQUEST_TIMEOUT,
+                )
+                response.raise_for_status()
+                data = response.json().get("data", [])
+                models = sorted(m["id"] for m in data if m.get("id"))
+                cls.models_cache = models if models else cls._fallback_models[:]
+                cls.last_fetch_time = current_time
+            except Exception as e:
+                print(f"[ImageGenNode] Error fetching image models: {e}")
+                if cls.models_cache is None:
+                    cls.models_cache = cls._fallback_models[:]
         return cls.models_cache
 
     def generate_image(self, api_key, prompt, model,
