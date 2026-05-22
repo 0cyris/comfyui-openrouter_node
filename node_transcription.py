@@ -89,16 +89,26 @@ class OpenRouterTranscriptionNode:
     @classmethod
     def fetch_openrouter_models(cls):
         """
-        Fetches STT model IDs from the OpenRouter API, filtered to models
-        whose input modality includes audio (e.g. "audio->text").
+        Fetches STT model IDs via GET /api/v1/models?output_modalities=transcription.
 
-        Falls back to the hardcoded Whisper list on any error.
+        By analogy with the speech node (?output_modalities=speech), this query
+        parameter returns only transcription models, avoiding chat-completion
+        models that accept audio input (e.g. gpt-4o-audio-preview) which are
+        incompatible with the /audio/transcriptions endpoint.
+
+        Falls back to the hardcoded Whisper list if the fetch fails or returns nothing.
         """
         current_time = time.time()
         if cls.models_cache is None or (current_time - cls.last_fetch_time > cls.cache_duration):
             try:
-                raw, _ = shared.fetch_all_models_raw()
-                models = shared.filter_models_by_input(raw, "audio")
+                response = requests.get(
+                    f"{shared.BASE_URL}/models",
+                    params={"output_modalities": "transcription"},
+                    timeout=shared.DEFAULT_REQUEST_TIMEOUT,
+                )
+                response.raise_for_status()
+                data = response.json().get("data", [])
+                models = sorted(m["id"] for m in data if m.get("id"))
                 cls.models_cache = models if models else cls._fallback_models[:]
                 cls.last_fetch_time = current_time
             except Exception as e:
