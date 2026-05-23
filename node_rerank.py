@@ -97,28 +97,8 @@ class OpenRouterRerankNode:
 
     @classmethod
     def fetch_openrouter_models(cls):
-        """
-        Fetches rerank model IDs via GET /api/v1/models?supported_parameters=rerank.
-        Falls back to the hardcoded Cohere/Jina list on any error.
-        """
-        current_time = time.time()
-        if cls.models_cache is None or (current_time - cls.last_fetch_time > cls.cache_duration):
-            try:
-                response = requests.get(
-                    f"{shared.BASE_URL}/models",
-                    params={"supported_parameters": "rerank"},
-                    timeout=shared.DEFAULT_REQUEST_TIMEOUT,
-                )
-                response.raise_for_status()
-                data = response.json().get("data", [])
-                models = sorted(m["id"] for m in data if m.get("id"))
-                cls.models_cache = models if models else cls._fallback_models[:]
-                cls.last_fetch_time = current_time
-            except Exception as e:
-                print(f"[RerankNode] Error fetching rerank models: {e}")
-                if cls.models_cache is None:
-                    cls.models_cache = cls._fallback_models[:]
-        return cls.models_cache
+        """Fetches rerank model IDs via GET /api/v1/models?output_modalities=rerank."""
+        return shared.fetch_filtered_models(cls, "rerank", cls._fallback_models, "[RerankNode]")
 
     def rerank(self, api_key, query, documents, model,
                top_n, request_timeout):

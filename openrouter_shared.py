@@ -206,6 +206,53 @@ def filter_models_by_input(models, input_modality):
     return sorted(result)
 
 
+def fetch_filtered_models(cls, output_modality, fallback_models, log_prefix):
+    """
+    Shared model-list fetcher for all modality-specific nodes.
+
+    Fetches GET /api/v1/models?output_modalities=<output_modality> with a
+    per-class 1-hour cache.  Each node passes its own class so the cache is
+    stored in the node's class attributes (cls.models_cache / cls.last_fetch_time)
+    rather than in a global dict — this keeps each node's list independent.
+
+    cls must expose:
+        cls.models_cache     — None or list[str]
+        cls.last_fetch_time  — float (Unix timestamp, default 0)
+        cls.cache_duration   — int seconds (default 3600)
+        cls._fallback_models — list[str] used when the API call fails and
+                               there is no existing cache
+
+    Args:
+        cls:              The calling node class (passed as the first arg of
+                          a classmethod).
+        output_modality:  Value for the ?output_modalities= query parameter
+                          (e.g. "speech", "transcription", "image", "rerank").
+        fallback_models:  list[str] of hardcoded model IDs used on error.
+        log_prefix:       String prepended to log messages, e.g. "[SpeechNode]".
+
+    Returns:
+        list[str] of model IDs, sorted alphabetically.
+    """
+    current_time = time.time()
+    if cls.models_cache is None or (current_time - cls.last_fetch_time > cls.cache_duration):
+        try:
+            response = requests.get(
+                f"{BASE_URL}/models",
+                params={"output_modalities": output_modality},
+                timeout=DEFAULT_REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json().get("data", [])
+            models = sorted(m["id"] for m in data if m.get("id"))
+            cls.models_cache = models if models else fallback_models[:]
+            cls.last_fetch_time = current_time
+        except Exception as e:
+            print(f"{log_prefix} Error fetching {output_modality} models: {e}")
+            if cls.models_cache is None:
+                cls.models_cache = fallback_models[:]
+    return cls.models_cache
+
+
 # ── Credits ───────────────────────────────────────────────────────────────────
 
 def fetch_credits(api_key, timeout=None):

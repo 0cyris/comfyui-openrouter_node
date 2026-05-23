@@ -98,33 +98,8 @@ class OpenRouterSpeechNode:
 
     @classmethod
     def fetch_openrouter_models(cls):
-        """
-        Fetches TTS-capable model IDs via GET /api/v1/models?output_modalities=speech.
-
-        This dedicated query parameter returns only speech-synthesis models,
-        avoiding the general audio-output filter which also matches chat-completion
-        models (e.g. gpt-4o-audio-preview) that are incompatible with /audio/speech.
-
-        Falls back to the hardcoded list if the fetch fails or returns nothing.
-        """
-        current_time = time.time()
-        if cls.models_cache is None or (current_time - cls.last_fetch_time > cls.cache_duration):
-            try:
-                response = requests.get(
-                    f"{shared.BASE_URL}/models",
-                    params={"output_modalities": "speech"},
-                    timeout=shared.DEFAULT_REQUEST_TIMEOUT,
-                )
-                response.raise_for_status()
-                data = response.json().get("data", [])
-                models = sorted(m["id"] for m in data if m.get("id"))
-                cls.models_cache = models if models else cls._fallback_models[:]
-                cls.last_fetch_time = current_time
-            except Exception as e:
-                print(f"[SpeechNode] Error fetching TTS models: {e}")
-                if cls.models_cache is None:
-                    cls.models_cache = cls._fallback_models[:]
-        return cls.models_cache
+        """Fetches TTS model IDs via GET /api/v1/models?output_modalities=speech."""
+        return shared.fetch_filtered_models(cls, "speech", cls._fallback_models, "[SpeechNode]")
 
     def _silent_audio(self):
         """Returns a silent 1-second mono audio placeholder."""
