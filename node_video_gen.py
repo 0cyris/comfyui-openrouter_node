@@ -91,6 +91,9 @@ class OpenRouterVideoGenNode:
             },
             "optional": {
                 "prompt_input": ("STRING", {"forceInput": True}),
+                "first_frame": ("IMAGE", {"forceInput": True}),
+                "last_frame": ("IMAGE", {"forceInput": True}),
+                # reference_1, reference_2, etc. are added dynamically by openrouter_dynamic_inputs.js
             }
         }
 
@@ -109,7 +112,8 @@ class OpenRouterVideoGenNode:
                        web_search=False, cheapest=False, fastest=False,
                        aspect_ratio="auto", duration=6, resolution="720p",
                        seed=0, generate_audio=False, request_timeout=120,
-                       poll_interval=5, prompt_input=None):
+                       poll_interval=5, prompt_input=None, first_frame=None,
+                       last_frame=None, **kwargs):
         """
         Submits a video generation request to OpenRouter and polls for completion.
 
@@ -163,6 +167,54 @@ class OpenRouterVideoGenNode:
             match = re.search(r'(\d+):(\d+)', aspect_ratio)
             if match:
                 data["aspect_ratio"] = f"{match.group(1)}:{match.group(2)}"
+
+        # Handle frame images (first/last frame for video generation)
+        frame_images = []
+        if first_frame is not None:
+            try:
+                frame_b64 = shared.image_to_base64(first_frame)
+                frame_images.append({
+                    "type": "first_frame",
+                    "url": f"data:image/png;base64,{frame_b64}"
+                })
+                print("[VideoGenNode] Added first_frame for video generation")
+            except Exception as e:
+                print(f"[VideoGenNode] Warning: Failed to process first_frame: {e}")
+
+        if last_frame is not None:
+            try:
+                frame_b64 = shared.image_to_base64(last_frame)
+                frame_images.append({
+                    "type": "last_frame",
+                    "url": f"data:image/png;base64,{frame_b64}"
+                })
+                print("[VideoGenNode] Added last_frame for video generation")
+            except Exception as e:
+                print(f"[VideoGenNode] Warning: Failed to process last_frame: {e}")
+
+        if frame_images:
+            data["frame_images"] = frame_images
+
+        # Handle reference images (for guidance/conditioning)
+        input_references = []
+        ref_keys = sorted(
+            [k for k in kwargs if k.startswith("reference_")],
+            key=lambda x: int(x.split("_")[1]) if "_" in x and x.split("_")[1].isdigit() else 0
+        )
+        for key in ref_keys:
+            if kwargs[key] is not None:
+                try:
+                    ref_b64 = shared.image_to_base64(kwargs[key])
+                    input_references.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{ref_b64}"}
+                    })
+                    print(f"[VideoGenNode] Added reference image from {key}")
+                except Exception as e:
+                    print(f"[VideoGenNode] Warning: Failed to process {key}: {e}")
+
+        if input_references:
+            data["input_references"] = input_references
 
         url = f"{shared.BASE_URL}/videos"
 
@@ -222,9 +274,16 @@ class OpenRouterVideoGenNode:
             if not video_bytes:
                 raise ValueError("Failed to download generated video")
 
+            print(f"[VideoGenNode] Downloaded {len(video_bytes)} bytes")
+
             # Convert video bytes to frame tensor
             print("[VideoGenNode] Converting video to frame tensor...")
             frames_tensor, video_metadata = shared.video_bytes_to_frames(video_bytes)
+
+            if frames_tensor.shape[0] <= 1 and frames_tensor.shape[1] == 64 and frames_tensor.shape[2] == 64:
+                print(f"[VideoGenNode] WARNING: Got placeholder tensor shape {frames_tensor.shape}, video extraction may have failed")
+            else:
+                print(f"[VideoGenNode] Successfully extracted frames: {frames_tensor.shape}")
 
             # Build VIDEO object for ComfyUI
             video_fps = video_metadata.get("fps", 24.0)
@@ -270,18 +329,49 @@ class OpenRouterVideoGenNode:
                    web_search=False, cheapest=False, fastest=False,
                    aspect_ratio="auto", duration=6, resolution="720p",
                    seed=0, generate_audio=False, request_timeout=120,
-                   poll_interval=5, prompt_input=None):
+                   poll_interval=5, prompt_input=None, first_frame=None,
+                   last_frame=None, **kwargs):
         """Check if any input that affects the output has changed."""
+        import hashlib
+
         try:
             timeout_int = int(request_timeout)
             timeout_int = max(cls.min_request_timeout, min(cls.max_request_timeout, timeout_int))
         except (ValueError, TypeError):
             timeout_int = cls.default_request_timeout
 
+        # Hash frame images
+        frame_hashes = []
+        for frame in [first_frame, last_frame]:
+            if frame is not None and isinstance(frame, torch.Tensor):
+                try:
+                    h = hashlib.sha256(frame.cpu().numpy().tobytes()).hexdigest()
+                    frame_hashes.append(h)
+                except Exception:
+                    frame_hashes.append("hash_error")
+            else:
+                frame_hashes.append(None)
+
+        # Hash reference images
+        ref_keys = sorted(
+            [k for k in kwargs if k.startswith("reference_")],
+            key=lambda x: int(x.split("_")[1]) if "_" in x and x.split("_")[1].isdigit() else 0
+        )
+        for key in ref_keys:
+            img = kwargs[key]
+            if img is not None and isinstance(img, torch.Tensor):
+                try:
+                    h = hashlib.sha256(img.cpu().numpy().tobytes()).hexdigest()
+                    frame_hashes.append(h)
+                except Exception:
+                    frame_hashes.append("hash_error")
+            else:
+                frame_hashes.append(None)
+
         return (
             api_key, prompt, model, web_search, cheapest, fastest,
             aspect_ratio, duration, resolution, seed, generate_audio,
-            timeout_int, prompt_input
+            timeout_int, prompt_input, tuple(frame_hashes)
         )
 
 
