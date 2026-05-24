@@ -589,3 +589,104 @@ def decode_audio_bytes(audio_bytes, fmt):
 
     print("[openrouter_shared] All audio decode methods failed; returning silent placeholder")
     return {"waveform": torch.zeros((1, 1, 44100), dtype=torch.float32), "sample_rate": 44100}
+
+
+# ── Video handling ───────────────────────────────────────────────────────────
+
+def download_file(url, timeout=None):
+    """
+    Downloads a file from a URL and returns the raw bytes.
+
+    Returns: bytes or None on failure.
+    """
+    try:
+        validated_timeout = validate_request_timeout(
+            timeout if timeout is not None else DEFAULT_REQUEST_TIMEOUT
+        )
+        response = requests.get(url, timeout=validated_timeout, stream=True)
+        response.raise_for_status()
+        return response.content
+    except Exception as e:
+        print(f"[openrouter_shared] Error downloading file: {e}")
+        return None
+
+
+def video_bytes_to_frames(video_bytes, extract_fps=True):
+    """
+    Converts raw video bytes to a frame tensor and metadata.
+
+    Returns: tuple(
+        frames_tensor: (num_frames, height, width, 3) in [0, 1] float,
+        metadata: dict with fps, frame_count, duration, width, height
+    )
+
+    On failure, returns (placeholder_tensor, empty_metadata).
+    """
+    try:
+        import cv2
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_file:
+            tmp_file.write(video_bytes)
+            tmp_path = tmp_file.name
+
+        try:
+            cap = cv2.VideoCapture(tmp_path)
+            if not cap.isOpened():
+                raise ValueError("Failed to open video file")
+
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+            if frame_count <= 0:
+                raise ValueError(f"Invalid frame count: {frame_count}")
+
+            frames = []
+            frame_idx = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                # Convert BGR to RGB and normalize to [0, 1]
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame_float = frame_rgb.astype(np.float32) / 255.0
+                frames.append(frame_float)
+                frame_idx += 1
+
+            cap.release()
+
+            if not frames:
+                raise ValueError("No frames extracted from video")
+
+            # Stack frames into tensor: (num_frames, height, width, 3)
+            frames_array = np.stack(frames, axis=0)
+            frames_tensor = torch.from_numpy(frames_array).to(dtype=torch.float32)
+
+            duration = frame_count / fps if fps > 0 else 0
+            metadata = {
+                "fps": float(fps),
+                "frame_count": frame_count,
+                "duration": float(duration),
+                "width": width,
+                "height": height,
+            }
+
+            print(f"[openrouter_shared] Extracted {frame_count} frames at {fps:.2f} fps, {width}x{height}")
+            return frames_tensor, metadata
+
+        finally:
+            os.unlink(tmp_path)
+
+    except ImportError:
+        print("[openrouter_shared] OpenCV (cv2) is required for video processing. Install it with: pip install opencv-python")
+        return _placeholder_video_tensor(), {}
+    except Exception as e:
+        print(f"[openrouter_shared] Error converting video bytes to frames: {e}")
+        return _placeholder_video_tensor(), {}
+
+
+def _placeholder_video_tensor():
+    """Returns a single black frame as placeholder."""
+    return torch.zeros((1, 64, 64, 3), dtype=torch.float32)

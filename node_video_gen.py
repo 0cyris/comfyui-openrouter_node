@@ -94,8 +94,8 @@ class OpenRouterVideoGenNode:
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("video_path", "Stats", "Credits")
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("video", "Stats", "Credits")
 
     FUNCTION = "generate_video"
     CATEGORY = "LLM"
@@ -113,9 +113,9 @@ class OpenRouterVideoGenNode:
         """
         Submits a video generation request to OpenRouter and polls for completion.
 
-        Returns (video_path_or_url, stats_str, credits_str).
+        Returns (frames_tensor, stats_str, credits_str).
         """
-        error_placeholder = "video_generation_failed"
+        error_placeholder = shared._placeholder_video_tensor()
 
         # Resolve API key and prompt
         api_key = shared.get_api_key(api_key)
@@ -212,20 +212,33 @@ class OpenRouterVideoGenNode:
             if not video_url:
                 raise ValueError(f"Video generation timed out after {elapsed:.1f}s")
 
+            # Download video bytes
+            print(f"[VideoGenNode] Downloading video from: {video_url[:100]}...")
+            video_bytes = shared.download_file(video_url, validated_timeout)
+            if not video_bytes:
+                raise ValueError("Failed to download generated video")
+
+            # Convert video bytes to frame tensor
+            print("[VideoGenNode] Converting video to frame tensor...")
+            frames_tensor, video_metadata = shared.video_bytes_to_frames(video_bytes)
+
             # Stats
             usage = status_data.get("usage", {})
             cost_usd = usage.get("USD", 0.0)
+            frame_count = video_metadata.get("frame_count", 0)
+            video_fps = video_metadata.get("fps", 0)
 
             stats = (
                 f"Job ID: {job_id}, "
+                f"Frames: {frame_count}, "
+                f"FPS: {video_fps:.1f}, "
                 f"Time: {elapsed:.1f}s, "
-                f"Duration: {duration}s, "
                 f"Cost: ${cost_usd:.3f}, "
                 f"Model: {modified_model}"
             )
 
             credits = shared.fetch_credits(api_key, validated_timeout)
-            return (video_url, stats, credits)
+            return (frames_tensor, stats, credits)
 
         except requests.exceptions.RequestException as e:
             error_msg = f"API Request Error: {str(e)}"
@@ -239,8 +252,9 @@ class OpenRouterVideoGenNode:
             print(f"[VideoGenNode] ERROR: {error_msg}")
             return (error_placeholder, "Stats N/A due to error", error_msg)
         except Exception as e:
-            print(f"[VideoGenNode] ERROR: {str(e)}")
-            return (error_placeholder, "Stats N/A due to error", f"Node Error: {str(e)}")
+            error_msg = f"Node Error: {str(e)}"
+            print(f"[VideoGenNode] ERROR: {error_msg}")
+            return (error_placeholder, "Stats N/A due to error", error_msg)
 
     @classmethod
     def IS_CHANGED(cls, api_key, prompt, model,
