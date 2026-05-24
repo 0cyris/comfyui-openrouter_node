@@ -593,9 +593,14 @@ def decode_audio_bytes(audio_bytes, fmt):
 
 # ── Video handling ───────────────────────────────────────────────────────────
 
-def download_file(url, timeout=None):
+def download_file(url, timeout=None, headers=None):
     """
     Downloads a file from a URL and returns the raw bytes.
+
+    Args:
+        url: The URL to download from.
+        timeout: Optional request timeout in seconds.
+        headers: Optional dict of HTTP headers (e.g. for Authorization).
 
     Returns: bytes or None on failure.
     """
@@ -603,7 +608,12 @@ def download_file(url, timeout=None):
         validated_timeout = validate_request_timeout(
             timeout if timeout is not None else DEFAULT_REQUEST_TIMEOUT
         )
-        response = requests.get(url, timeout=validated_timeout, stream=True)
+        response = requests.get(
+            url,
+            timeout=validated_timeout,
+            stream=True,
+            headers=headers or {},
+        )
         response.raise_for_status()
         return response.content
     except Exception as e:
@@ -690,3 +700,149 @@ def video_bytes_to_frames(video_bytes, extract_fps=True):
 def _placeholder_video_tensor():
     """Returns a single black frame as placeholder."""
     return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+
+
+def _import_comfy_video_classes():
+    """
+    Attempts to import ComfyUI's VideoFromComponents and VideoComponents classes
+    from various known locations. Returns (VideoFromComponents, VideoComponents)
+    or (None, None) if unavailable.
+    """
+    import_paths = [
+        ("comfy_api.latest._input_impl.video_types",
+         "comfy_api.latest._util.video_types"),
+        ("comfy_api.input_impl.video_types",
+         "comfy_api.util.video_types"),
+        ("comfy_api.input_impl",
+         "comfy_api.util"),
+    ]
+    for impl_path, util_path in import_paths:
+        try:
+            impl_mod = __import__(impl_path, fromlist=["VideoFromComponents"])
+            util_mod = __import__(util_path, fromlist=["VideoComponents"])
+            return (
+                getattr(impl_mod, "VideoFromComponents"),
+                getattr(util_mod, "VideoComponents"),
+            )
+        except (ImportError, AttributeError):
+            continue
+    return None, None
+
+
+def build_video_object(frames_tensor, fps, audio=None, metadata=None):
+    """
+    Constructs a ComfyUI VIDEO object from frame tensor and metadata.
+
+    Uses VideoFromComponents/VideoComponents when available (ComfyUI core),
+    otherwise returns a minimal compatible wrapper that implements the
+    VideoInput interface (get_components, get_dimensions, save_to).
+
+    Args:
+        frames_tensor: (N, H, W, 3) tensor with values in [0, 1].
+        fps: Frame rate as float or Fraction.
+        audio: Optional AUDIO dict {"waveform": tensor, "sample_rate": int}.
+        metadata: Optional metadata dict.
+
+    Returns: A VIDEO object compatible with ComfyUI's SaveVideo node.
+    """
+    from fractions import Fraction
+
+    if isinstance(fps, Fraction):
+        frame_rate = fps
+    else:
+        try:
+            fps_float = float(fps) if fps else 24.0
+            if fps_float <= 0:
+                fps_float = 24.0
+            # Use limit_denominator for fractional fps like 29.97
+            frame_rate = Fraction(fps_float).limit_denominator(1000)
+        except (ValueError, TypeError):
+            frame_rate = Fraction(24, 1)
+
+    VideoFromComponents, VideoComponents = _import_comfy_video_classes()
+
+    if VideoFromComponents is not None and VideoComponents is not None:
+        try:
+            components = VideoComponents(
+                images=frames_tensor,
+                frame_rate=frame_rate,
+                audio=audio,
+                metadata=metadata or {},
+            )
+            return VideoFromComponents(components)
+        except Exception as e:
+            print(f"[openrouter_shared] Failed to build ComfyUI VideoFromComponents: {e}, falling back to wrapper")
+
+    return _FallbackVideoObject(frames_tensor, frame_rate, audio, metadata or {})
+
+
+class _FallbackVideoObject:
+    """
+    Minimal VideoInput-compatible wrapper used when ComfyUI's video classes
+    cannot be imported. Implements get_components, get_dimensions, and save_to.
+    """
+
+    def __init__(self, images, frame_rate, audio=None, metadata=None):
+        self._images = images
+        self._frame_rate = frame_rate
+        self._audio = audio
+        self._metadata = metadata or {}
+
+    def get_components(self):
+        """Returns a namespace-like object with images, frame_rate, audio, metadata."""
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            images=self._images,
+            frame_rate=self._frame_rate,
+            audio=self._audio,
+            metadata=self._metadata,
+            alpha=None,
+        )
+
+    def get_dimensions(self):
+        """Returns (width, height) from the frame tensor shape."""
+        if self._images is None or self._images.ndim < 3:
+            return (0, 0)
+        # tensor shape: (N, H, W, 3)
+        height = int(self._images.shape[1])
+        width = int(self._images.shape[2])
+        return (width, height)
+
+    def get_duration(self):
+        if self._images is None or self._frame_rate == 0:
+            return 0.0
+        return float(self._images.shape[0]) / float(self._frame_rate)
+
+    def get_frame_rate(self):
+        return self._frame_rate
+
+    def get_frame_count(self):
+        if self._images is None:
+            return 0
+        return int(self._images.shape[0])
+
+    def save_to(self, path, format=None, codec=None, metadata=None):
+        """
+        Saves the video frames to disk using OpenCV (mp4 + mp4v codec).
+        """
+        try:
+            import cv2
+        except ImportError:
+            raise RuntimeError("OpenCV is required for saving video. Install with: pip install opencv-python")
+
+        if self._images is None or self._images.shape[0] == 0:
+            raise ValueError("No frames to save")
+
+        width, height = self.get_dimensions()
+        fps = float(self._frame_rate) if float(self._frame_rate) > 0 else 24.0
+
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(str(path), fourcc, fps, (width, height))
+        try:
+            frames_np = (self._images.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+            for frame in frames_np:
+                # Convert RGB -> BGR for OpenCV
+                bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                writer.write(bgr)
+        finally:
+            writer.release()
