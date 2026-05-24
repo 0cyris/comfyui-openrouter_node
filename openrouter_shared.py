@@ -636,19 +636,28 @@ def video_bytes_to_frames(video_bytes, extract_fps=True):
         import cv2
         import tempfile
 
+        if not video_bytes or len(video_bytes) == 0:
+            raise ValueError("Empty video bytes")
+
+        print(f"[openrouter_shared] Processing {len(video_bytes)} bytes of video data")
+
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_file:
             tmp_file.write(video_bytes)
             tmp_path = tmp_file.name
 
+        print(f"[openrouter_shared] Temp video written to: {tmp_path}")
+
         try:
             cap = cv2.VideoCapture(tmp_path)
             if not cap.isOpened():
-                raise ValueError("Failed to open video file")
+                raise ValueError("Failed to open video file with OpenCV - check codec support")
 
             fps = cap.get(cv2.CAP_PROP_FPS)
             frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+            print(f"[openrouter_shared] Video properties: {frame_count} frames, {width}x{height}, {fps:.2f} fps")
 
             if frame_count <= 0:
                 raise ValueError(f"Invalid frame count: {frame_count}")
@@ -689,11 +698,13 @@ def video_bytes_to_frames(video_bytes, extract_fps=True):
         finally:
             os.unlink(tmp_path)
 
-    except ImportError:
-        print("[openrouter_shared] OpenCV (cv2) is required for video processing. Install it with: pip install opencv-python")
+    except ImportError as e:
+        print(f"[openrouter_shared] OpenCV (cv2) is required for video processing. Install it with: pip install opencv-python. Error: {e}")
         return _placeholder_video_tensor(), {}
     except Exception as e:
+        import traceback
         print(f"[openrouter_shared] Error converting video bytes to frames: {e}")
+        print(f"[openrouter_shared] Traceback: {traceback.format_exc()}")
         return _placeholder_video_tensor(), {}
 
 
