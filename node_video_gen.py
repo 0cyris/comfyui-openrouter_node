@@ -2,7 +2,7 @@
 node_video_gen.py — OpenRouter Video Generation Node
 
 Targets video-generation models on OpenRouter (e.g. RunwayML, Luma).
-Accepts a text prompt and optional parameters; outputs a video file path or URL.
+Accepts a text prompt and optional parameters; outputs a VIDEO tensor.
 Handles async polling until the video is generated.
 """
 
@@ -11,6 +11,7 @@ import json
 import time
 import hashlib
 import torch
+from fractions import Fraction
 from . import openrouter_shared as shared
 
 
@@ -94,7 +95,7 @@ class OpenRouterVideoGenNode:
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_TYPES = ("VIDEO", "STRING", "STRING")
     RETURN_NAMES = ("video", "Stats", "Credits")
 
     FUNCTION = "generate_video"
@@ -113,9 +114,14 @@ class OpenRouterVideoGenNode:
         """
         Submits a video generation request to OpenRouter and polls for completion.
 
-        Returns (frames_tensor, stats_str, credits_str).
+        Returns (video_dict, stats_str, credits_str).
         """
-        error_placeholder = shared._placeholder_video_tensor()
+        error_placeholder = {
+            "images": shared._placeholder_video_tensor(),
+            "frame_rate": Fraction(24, 1),
+            "audio": None,
+            "metadata": {},
+        }
 
         # Resolve API key and prompt
         api_key = shared.get_api_key(api_key)
@@ -222,11 +228,21 @@ class OpenRouterVideoGenNode:
             print("[VideoGenNode] Converting video to frame tensor...")
             frames_tensor, video_metadata = shared.video_bytes_to_frames(video_bytes)
 
+            # Build VIDEO object for ComfyUI
+            video_fps = video_metadata.get("fps", 24.0)
+            frame_rate = Fraction(int(round(video_fps)), 1)
+
+            video_dict = {
+                "images": frames_tensor,
+                "frame_rate": frame_rate,
+                "audio": None,
+                "metadata": video_metadata,
+            }
+
             # Stats
             usage = status_data.get("usage", {})
             cost_usd = usage.get("USD", 0.0)
             frame_count = video_metadata.get("frame_count", 0)
-            video_fps = video_metadata.get("fps", 0)
 
             stats = (
                 f"Job ID: {job_id}, "
@@ -238,7 +254,7 @@ class OpenRouterVideoGenNode:
             )
 
             credits = shared.fetch_credits(api_key, validated_timeout)
-            return (frames_tensor, stats, credits)
+            return (video_dict, stats, credits)
 
         except requests.exceptions.RequestException as e:
             error_msg = f"API Request Error: {str(e)}"
