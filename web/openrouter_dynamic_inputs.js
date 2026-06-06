@@ -1,7 +1,7 @@
 /**
- * Dynamic image inputs for OpenRouter Nodes
- * Handles dynamic image_N slot management for both the text LLM node
- * and the image generation node.
+ * Dynamic inputs for OpenRouter Nodes
+ * - Handles dynamic image_N slot management for text LLM and image generation nodes
+ * - Handles dynamic voice dropdown updates for speech node based on selected model
  */
 
 import { app } from "../../../scripts/app.js"
@@ -20,6 +20,11 @@ const TypeSlotEvent = {
 const DYNAMIC_IMAGE_NODE_IDS = new Set([
     "OpenRouterNode",
     "OpenRouterImageGenNode",
+]);
+
+// Node types that get dynamic voice dropdown
+const DYNAMIC_VOICE_NODE_IDS = new Set([
+    "OpenRouterSpeechNode",
 ]);
 
 const PREFIX = "image";
@@ -139,6 +144,77 @@ app.registerExtension({
                 this?.graph?.setDirtyCanvas(true);
                 return me;
             }
+        }
+
+        return nodeType;
+    },
+})
+
+// Dynamic voice dropdown for SpeechNode based on model selection
+app.registerExtension({
+    name: 'OpenRouter.DynamicVoices',
+    async beforeRegisterNodeDef(nodeType, nodeData, app) {
+        // Only apply to speech node
+        if (!DYNAMIC_VOICE_NODE_IDS.has(nodeData.name)) {
+            return
+        }
+
+        const onNodeCreated = nodeType.prototype.onNodeCreated;
+        nodeType.prototype.onNodeCreated = function () {
+            const me = onNodeCreated?.apply(this);
+
+            // Find the model and voice widgets
+            const modelWidget = this.widgets?.find(w => w.name === "model");
+            const voiceWidget = this.widgets?.find(w => w.name === "voice");
+
+            if (modelWidget && voiceWidget) {
+                // Store original callback
+                const originalModelCallback = modelWidget.callback;
+
+                // Override model widget callback to update voices when model changes
+                modelWidget.callback = async (value) => {
+                    // Call original callback if it exists
+                    if (originalModelCallback) {
+                        originalModelCallback.apply(modelWidget, arguments);
+                    }
+
+                    // Fetch voices for the selected model
+                    try {
+                        const apiKeyWidget = this.widgets?.find(w => w.name === "api_key");
+                        const apiKey = apiKeyWidget?.value || "";
+
+                        // Call the backend API to get supported voices
+                        const response = await fetch("/openrouter/voices/" + encodeURIComponent(value), {
+                            method: "GET",
+                            headers: apiKey ? { "Authorization": `Bearer ${apiKey}` } : {},
+                        });
+
+                        if (response.ok) {
+                            const data = await response.json();
+                            const voices = data.voices || [];
+
+                            // Update voice widget options
+                            if (Array.isArray(voices) && voices.length > 0) {
+                                voiceWidget.options.content = voices;
+                                // Set to first available voice if current selection isn't available
+                                if (!voices.includes(voiceWidget.value)) {
+                                    voiceWidget.value = voices[0];
+                                }
+                                console.log(`[SpeechNode] Updated voices for model ${value}: ${voices.join(", ")}`);
+                            } else {
+                                // If no specific voices, allow free text
+                                console.log(`[SpeechNode] No supported voices list for model ${value}, voice remains free-text`);
+                            }
+                        } else {
+                            console.warn(`[SpeechNode] Failed to fetch voices for model ${value}`);
+                        }
+                    } catch (error) {
+                        console.warn(`[SpeechNode] Error fetching voices: ${error}`);
+                    }
+                };
+            }
+
+            return me;
         }
 
         return nodeType;
