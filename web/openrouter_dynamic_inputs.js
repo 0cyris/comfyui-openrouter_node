@@ -168,11 +168,15 @@ app.registerExtension({
             const voiceWidget = this.widgets?.find(w => w.name === "voice");
 
             if (modelWidget && voiceWidget) {
+                console.log("[SpeechNode] Found model and voice widgets");
+
                 // Store original callback
                 const originalModelCallback = modelWidget.callback;
 
                 // Override model widget callback to update voices when model changes
                 modelWidget.callback = async (value) => {
+                    console.log(`[SpeechNode] Model changed to: ${value}`);
+
                     // Call original callback if it exists
                     if (originalModelCallback) {
                         originalModelCallback.apply(modelWidget, arguments);
@@ -183,8 +187,10 @@ app.registerExtension({
                         const apiKeyWidget = this.widgets?.find(w => w.name === "api_key");
                         const apiKey = apiKeyWidget?.value || "";
 
-                        // Call the backend API to get supported voices
-                        const response = await fetch("/openrouter/voices/" + encodeURIComponent(value), {
+                        const url = "/openrouter/voices/" + encodeURIComponent(value);
+                        console.log(`[SpeechNode] Fetching voices from: ${url}`);
+
+                        const response = await fetch(url, {
                             method: "GET",
                             headers: apiKey ? { "Authorization": `Bearer ${apiKey}` } : {},
                         });
@@ -193,20 +199,32 @@ app.registerExtension({
                             const data = await response.json();
                             const voices = data.voices || [];
 
-                            // Update voice widget options
+                            console.log(`[SpeechNode] Got voices: ${JSON.stringify(voices)}`);
+
+                            // Update voice widget options - ComfyUI expects options.values for combos
                             if (Array.isArray(voices) && voices.length > 0) {
-                                voiceWidget.options.content = voices;
+                                // For ComfyUI combo widgets, update the options array
+                                voiceWidget.options.values = voices;
+
                                 // Set to first available voice if current selection isn't available
                                 if (!voices.includes(voiceWidget.value)) {
                                     voiceWidget.value = voices[0];
+                                    console.log(`[SpeechNode] Set voice to: ${voices[0]}`);
+                                } else {
+                                    console.log(`[SpeechNode] Kept voice: ${voiceWidget.value}`);
                                 }
-                                console.log(`[SpeechNode] Updated voices for model ${value}: ${voices.join(", ")}`);
+
+                                // Mark canvas dirty to force UI update
+                                if (this.graph) {
+                                    this.graph.setDirtyCanvas(true);
+                                }
                             } else {
-                                // If no specific voices, allow free text
-                                console.log(`[SpeechNode] No supported voices list for model ${value}, voice remains free-text`);
+                                console.log(`[SpeechNode] No supported voices list for model ${value}`);
                             }
                         } else {
-                            console.warn(`[SpeechNode] Failed to fetch voices for model ${value}`);
+                            console.warn(`[SpeechNode] Failed to fetch voices - status ${response.status}`);
+                            const text = await response.text();
+                            console.warn(`[SpeechNode] Response: ${text}`);
                         }
                     } catch (error) {
                         console.warn(`[SpeechNode] Error fetching voices: ${error}`);
