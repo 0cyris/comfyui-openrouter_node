@@ -276,13 +276,21 @@ def get_model_details(model_id, api_key=None, timeout=None):
         response.raise_for_status()
         models = response.json().get("data", [])
 
+        print(f"[openrouter_shared] Fetched {len(models)} total models")
+
         for m in models:
             if m.get("id") == model_id:
+                supported_voices = m.get("supported_voices")
+                print(f"[openrouter_shared] Found model {model_id}")
+                print(f"[openrouter_shared]   supported_voices: {supported_voices}")
                 return m
 
+        print(f"[openrouter_shared] Model {model_id} not found in /models list")
         return {}
     except Exception as e:
         print(f"[openrouter_shared] Error fetching model details for {model_id}: {e}")
+        import traceback
+        print(f"[openrouter_shared] Traceback: {traceback.format_exc()}")
         return {}
 
 
@@ -292,14 +300,25 @@ def get_model_supported_voices(model_id, api_key=None, timeout=None):
 
     Returns: list[str] of voice IDs, or empty list if none or model not found.
     """
+    print(f"[openrouter_shared] get_model_supported_voices called for {model_id}")
     model_details = get_model_details(model_id, api_key, timeout)
+
+    if not model_details:
+        print(f"[openrouter_shared] No model details found")
+        return []
+
     voices = model_details.get("supported_voices")
+    print(f"[openrouter_shared] Raw supported_voices value: {voices} (type: {type(voices)})")
 
     if voices is None:
+        print(f"[openrouter_shared] supported_voices is None")
         return []
+
     if isinstance(voices, list):
+        print(f"[openrouter_shared] Returning {len(voices)} voices")
         return voices
 
+    print(f"[openrouter_shared] supported_voices is not a list: {type(voices)}")
     return []
 
 
