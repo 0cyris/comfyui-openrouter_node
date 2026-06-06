@@ -268,15 +268,17 @@ def get_model_details(model_id, api_key=None, timeout=None):
         if api_key:
             headers = build_standard_headers(api_key)
 
+        # Fetch speech models to get supported_voices (faster than fetching all models)
         response = requests.get(
             f"{BASE_URL}/models",
+            params={"output_modalities": "speech"},
             timeout=validated_timeout,
             headers=headers,
         )
         response.raise_for_status()
         models = response.json().get("data", [])
 
-        print(f"[openrouter_shared] Fetched {len(models)} total models")
+        print(f"[openrouter_shared] Fetched {len(models)} speech models")
 
         for m in models:
             if m.get("id") == model_id:
@@ -285,7 +287,7 @@ def get_model_details(model_id, api_key=None, timeout=None):
                 print(f"[openrouter_shared]   supported_voices: {supported_voices}")
                 return m
 
-        print(f"[openrouter_shared] Model {model_id} not found in /models list")
+        print(f"[openrouter_shared] Model {model_id} not found in speech models list")
         return {}
     except Exception as e:
         print(f"[openrouter_shared] Error fetching model details for {model_id}: {e}")
