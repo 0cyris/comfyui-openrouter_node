@@ -253,6 +253,56 @@ def fetch_filtered_models(cls, output_modality, fallback_models, log_prefix):
     return cls.models_cache
 
 
+def get_model_details(model_id, api_key=None, timeout=None):
+    """
+    Fetches details for a specific model from the /models endpoint.
+
+    Returns a dict with model info or empty dict on failure.
+    Includes: id, name, supported_voices, architecture, etc.
+    """
+    try:
+        validated_timeout = validate_request_timeout(
+            timeout if timeout is not None else DEFAULT_REQUEST_TIMEOUT
+        )
+        headers = {}
+        if api_key:
+            headers = build_standard_headers(api_key)
+
+        response = requests.get(
+            f"{BASE_URL}/models",
+            timeout=validated_timeout,
+            headers=headers,
+        )
+        response.raise_for_status()
+        models = response.json().get("data", [])
+
+        for m in models:
+            if m.get("id") == model_id:
+                return m
+
+        return {}
+    except Exception as e:
+        print(f"[openrouter_shared] Error fetching model details for {model_id}: {e}")
+        return {}
+
+
+def get_model_supported_voices(model_id, api_key=None, timeout=None):
+    """
+    Fetches the list of supported voices for a TTS model.
+
+    Returns: list[str] of voice IDs, or empty list if none or model not found.
+    """
+    model_details = get_model_details(model_id, api_key, timeout)
+    voices = model_details.get("supported_voices")
+
+    if voices is None:
+        return []
+    if isinstance(voices, list):
+        return voices
+
+    return []
+
+
 # ── Credits ───────────────────────────────────────────────────────────────────
 
 def fetch_credits(api_key, timeout=None):

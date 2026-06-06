@@ -154,6 +154,14 @@ class OpenRouterSpeechNode:
             speed_f = 1.0
 
         headers = shared.build_standard_headers(api_key)
+
+        # Fetch supported voices for the model and validate selection
+        supported_voices = shared.get_model_supported_voices(model, api_key, validated_timeout)
+        voice_warning = ""
+        if supported_voices and voice not in supported_voices:
+            voice_warning = f"[SpeechNode] WARNING: Voice '{voice}' not in supported voices for {model}: {supported_voices}"
+            print(voice_warning)
+
         url = f"{shared.BASE_URL}/audio/speech"
 
         data = {
@@ -183,10 +191,17 @@ class OpenRouterSpeechNode:
 
             audio_dict = shared.decode_audio_bytes(audio_bytes, output_format)
 
+            # Build stats string with voice info
+            voice_info = f"Voice: {voice}"
+            if supported_voices:
+                voice_info += f" (Supported: {', '.join(supported_voices)})"
+            elif voice_warning:
+                voice_info += " (Not in supported list)"
+
             stats = (
                 f"TPS: N/A, Prompt Tokens: N/A, Completion Tokens: N/A, "
                 f"Temp: N/A, Model: {model}, "
-                f"Format: {output_format}, Voice: {voice}, Speed: {speed_f:.2f}, "
+                f"Format: {output_format}, {voice_info}, Speed: {speed_f:.2f}, "
                 f"Elapsed: {elapsed:.2f}s"
             )
 
