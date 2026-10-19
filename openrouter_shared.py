@@ -451,6 +451,15 @@ def image_to_base64(image):
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 
+def image_batch_to_base64_list(image):
+    """Converts every frame of a ComfyUI IMAGE batch (BHWC) to a base64 PNG string."""
+    if not isinstance(image, torch.Tensor):
+        raise TypeError("Input 'image' is not a torch.Tensor")
+    if image.ndim == 3:
+        image = image.unsqueeze(0)
+    return [image_to_base64(frame.unsqueeze(0)) for frame in image]
+
+
 def base64_to_image(base64_str):
     """
     Converts a base64 image string to a ComfyUI image tensor [1, H, W, 3], values in [0, 1].

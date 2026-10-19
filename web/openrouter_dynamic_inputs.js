@@ -20,6 +20,7 @@ const TypeSlotEvent = {
 const DYNAMIC_IMAGE_NODE_IDS = new Set([
     "OpenRouterNode",
     "OpenRouterImageGenNode",
+    "OpenRouterImageAPINode",
 ]);
 
 // Node types that get dynamic voice dropdown

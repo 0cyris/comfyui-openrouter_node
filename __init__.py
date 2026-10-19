@@ -4,11 +4,12 @@ from .node_speech import NODE_CLASS_MAPPINGS as _S, NODE_DISPLAY_NAME_MAPPINGS a
 from .node_transcription import NODE_CLASS_MAPPINGS as _TR, NODE_DISPLAY_NAME_MAPPINGS as _TRN
 from .node_rerank import NODE_CLASS_MAPPINGS as _RR, NODE_DISPLAY_NAME_MAPPINGS as _RRN
 from .node_video_gen import NODE_CLASS_MAPPINGS as _V, NODE_DISPLAY_NAME_MAPPINGS as _VN
+from .node_image_api import NODE_CLASS_MAPPINGS as _IA, NODE_DISPLAY_NAME_MAPPINGS as _IAN
 from . import openrouter_shared as shared
 import json
 
-NODE_CLASS_MAPPINGS = {**_T, **_I, **_S, **_TR, **_RR, **_V}
-NODE_DISPLAY_NAME_MAPPINGS = {**_TN, **_IN, **_SN, **_TRN, **_RRN, **_VN}
+NODE_CLASS_MAPPINGS = {**_T, **_I, **_IA, **_S, **_TR, **_RR, **_V}
+NODE_DISPLAY_NAME_MAPPINGS = {**_TN, **_IN, **_IAN, **_SN, **_TRN, **_RRN, **_VN}
 
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
