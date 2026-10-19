@@ -147,14 +147,14 @@ class OpenRouterDecisionNode:
                 name, colon, guidance = line.partition(":")
                 name = name.strip()
                 if name in criteria:
-                    raise RuntimeError(f"Duplicate option '{name}' in criteria")
+                    raise RuntimeError(f"Duplicate option '{name}' in criteria: each choice option needs a unique name")
                 criteria[name] = guidance.strip() if colon else None
             if not criteria:
-                raise RuntimeError("Choice questions need at least one option in criteria")
+                raise RuntimeError("question_type is 'choice' but criteria is empty: write one option per line as 'name: guidance', or set question_type to 'noul' for a yes/no question")
         else:
             criteria = lines
             if not criteria:
-                raise RuntimeError("Score questions need at least one level in criteria")
+                raise RuntimeError("question_type is 'score' but criteria is empty: write one level per line, lowest first, or set question_type to 'noul' for a yes/no question")
         return {
             "model": model,
             "questions": {QUESTION_NAME: {"type": question_type, "instructions": instructions, "criteria": criteria}},
@@ -184,13 +184,13 @@ class OpenRouterDecisionNode:
                      state_text, threshold, request_timeout, retries, candidates=None, **kwargs):
         api_key = shared.get_api_key(api_key)
         if not api_key:
-            raise RuntimeError("API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json")
+            raise RuntimeError("API key not provided: fill in api_key, set the LLM_KEY env var, or use openrouter_api_key.json")
         timeout = shared.validate_request_timeout(
             request_timeout, self.min_request_timeout, self.max_request_timeout, self.default_request_timeout)
         connected = [kwargs[k] for k in sorted((k for k in kwargs if k.startswith("image_")), key=lambda x: int(x.split("_")[1]))
                      if kwargs[k] is not None]
         if (connected or candidates is not None) and model in self.model_input_modalities and "image" not in self.model_input_modalities[model]:
-            raise RuntimeError(f"{model} does not accept images")
+            raise RuntimeError(f"{model} does not accept images, but image_N or candidates is connected: pick a model that accepts images or disconnect them")
         context = []
         for batch in connected:
             context.extend(await asyncio.to_thread(image_batch_to_jpeg_base64_list, batch))

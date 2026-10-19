@@ -295,7 +295,7 @@ class CandidateTests(unittest.TestCase):
 
     def test_invalid_criteria_raises_without_request(self):
         with patch.object(shared.requests, "post") as post:
-            with self.assertRaisesRegex(RuntimeError, "at least one option"):
+            with self.assertRaisesRegex(RuntimeError, "criteria is empty.*name: guidance"):
                 decide(question_type="choice", criteria="", candidates=candidates(2))
         post.assert_not_called()
 
@@ -396,13 +396,13 @@ class InvalidCriteriaTests(unittest.TestCase):
         post.assert_not_called()
 
     def test_choice_without_options(self):
-        self.assert_rejected("at least one option", question_type="choice", criteria=" \n\n")
+        self.assert_rejected("criteria is empty.*name: guidance", question_type="choice", criteria=" \n\n")
 
     def test_choice_duplicate_names(self):
         self.assert_rejected("Duplicate option 'a'", question_type="choice", criteria="a: x\nb\na: y")
 
     def test_score_without_levels(self):
-        self.assert_rejected("at least one level", question_type="score", criteria="\n \n")
+        self.assert_rejected("criteria is empty.*lowest first", question_type="score", criteria="\n \n")
 
 
 class OutputTests(unittest.TestCase):
