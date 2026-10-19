@@ -44,9 +44,20 @@ def answer_body(noul, **extra):
     return {"answers": {"decision": {"type": "noul", "noul": noul}}, **extra}
 
 
+def choice_body(choice, confidence, probabilities, **extra):
+    return {"answers": {"decision": {"type": "choice", "choice": choice, "confidence": confidence,
+                                     "probabilities": probabilities}}, **extra}
+
+
+def score_body(score, legend, **extra):
+    return {"answers": {"decision": {"type": "score", "score": score, "confidence": 0.9,
+                                     "probabilities": {}, "legend": legend}}, **extra}
+
+
 def decide(**overrides):
-    args = dict(api_key="key", model="m", instructions="Is it a bug?", true_guidance="broken",
-                false_guidance="fine", state_text="the text", threshold=0.5, request_timeout=120, retries=1)
+    args = dict(api_key="key", model="m", question_type="noul", instructions="Is it a bug?", criteria="",
+                true_guidance="broken", false_guidance="fine", state_text="the text", threshold=0.5,
+                request_timeout=120, retries=1)
     args.update(overrides)
     return asyncio.run(Node().decide(**args))
 
@@ -73,6 +84,87 @@ class PayloadTests(unittest.TestCase):
     def test_empty_state_text_sends_empty_state(self):
         _, post = run_with(answer_body(0.9), state_text="")
         self.assertEqual(post.call_args.kwargs["json"]["state"], [])
+
+
+class CriteriaPayloadTests(unittest.TestCase):
+    def test_choice_options_from_lines(self):
+        criteria = "left: faces viewer-left\n\n  right : faces: viewer-right  \nback\n"
+        _, post = run_with(choice_body("left", 0.8, {}), question_type="choice", criteria=criteria)
+        self.assertEqual(post.call_args.kwargs["json"]["questions"], {"decision": {
+            "type": "choice",
+            "instructions": "Is it a bug?",
+            "criteria": {"left": "faces viewer-left", "right": "faces: viewer-right", "back": None},
+        }})
+
+    def test_score_levels_from_lines(self):
+        _, post = run_with(score_body(1.0, {"0": "bad", "1": "good: ok", "2": "great"}), question_type="score", criteria="bad\n\ngood: ok\n  great  ")
+        self.assertEqual(post.call_args.kwargs["json"]["questions"], {"decision": {
+            "type": "score",
+            "instructions": "Is it a bug?",
+            "criteria": ["bad", "good: ok", "great"],
+        }})
+
+    def test_noul_ignores_criteria(self):
+        _, post = run_with(answer_body(0.9), criteria="a: b\nc")
+        self.assertEqual(post.call_args.kwargs["json"]["questions"]["decision"]["criteria"],
+                         {"true": "broken", "false": "fine"})
+
+
+class ChoiceOutputTests(unittest.TestCase):
+    def test_maps_choice_confidence_and_probabilities(self):
+        body = choice_body("left", 0.7, {"left": 0.7, "right": 0.3}, usage={"cost": 0.00001})
+        answer, value, passed, details, cost = run_with(body, question_type="choice", criteria="left\nright")[0]
+        self.assertEqual((answer, value, passed, cost), ("left", 0.7, True, 0.00001))
+        self.assertEqual(json.loads(details)["probabilities"], {"left": 0.7, "right": 0.3})
+
+    def test_below_threshold_not_passed(self):
+        body = choice_body("left", 0.4, {"left": 0.4, "right": 0.3})
+        answer, value, passed, _, _ = run_with(body, question_type="choice", criteria="left\nright")[0]
+        self.assertEqual((answer, value, passed), ("left", 0.4, False))
+
+
+class ScoreOutputTests(unittest.TestCase):
+    legend = {"0": "bad", "1": "ok", "2": "good", "3": "great"}
+
+    def run_score(self, score, **overrides):
+        return run_with(score_body(score, self.legend), question_type="score", criteria="bad\nok\ngood\ngreat",
+                        **overrides)[0]
+
+    def test_normalises_score_by_level_count(self):
+        answer, value, passed, details, _ = self.run_score(2.0)
+        self.assertEqual((answer, value, passed), ("good", 2 / 3, True))
+        self.assertEqual(json.loads(details)["score"], 2.0)
+
+    def test_answer_is_legend_text_of_nearest_level(self):
+        self.assertEqual(self.run_score(1.4)[0], "ok")
+        self.assertEqual(self.run_score(1.6)[0], "good")
+        self.assertEqual(self.run_score(2.99)[0], "great")
+
+    def test_threshold_boundary_is_inclusive(self):
+        self.assertTrue(self.run_score(1.5, threshold=0.5)[2])
+        self.assertFalse(self.run_score(1.4, threshold=0.5)[2])
+
+    def test_single_level_gives_zero(self):
+        body = score_body(0.0, {"0": "only"})
+        answer, value, passed, _, _ = run_with(body, question_type="score", criteria="only")[0]
+        self.assertEqual((answer, value, passed), ("only", 0.0, False))
+
+
+class InvalidCriteriaTests(unittest.TestCase):
+    def assert_rejected(self, pattern, **overrides):
+        with patch.object(shared.requests, "post") as post:
+            with self.assertRaisesRegex(RuntimeError, pattern):
+                decide(**overrides)
+        post.assert_not_called()
+
+    def test_choice_without_options(self):
+        self.assert_rejected("at least one option", question_type="choice", criteria=" \n\n")
+
+    def test_choice_duplicate_names(self):
+        self.assert_rejected("Duplicate option 'a'", question_type="choice", criteria="a: x\nb\na: y")
+
+    def test_score_without_levels(self):
+        self.assert_rejected("at least one level", question_type="score", criteria="\n \n")
 
 
 class OutputTests(unittest.TestCase):

@@ -1,8 +1,8 @@
 """
 node_decision.py — OpenRouter Decision Node
 
-Asks one yes/no (noul) question about text through POST /api/alpha/decisions
-and returns the probability of true.
+Asks one noul, choice or score question about text through
+POST /api/alpha/decisions and returns the result as a 0-1 value.
 """
 
 import json
@@ -21,8 +21,8 @@ class OpenRouterDecisionNode:
     ComfyUI node for the OpenRouter Decisions API.
 
     Returns five outputs:
-      1) "answer" : "true" or "false" by threshold
-      2) "value"  : probability of true
+      1) "answer" : "true"/"false" by threshold (noul), the chosen option (choice) or the nearest level's legend text (score)
+      2) "value"  : probability of true (noul), confidence (choice) or score / (levels - 1) (score)
       3) "passed" : value >= threshold
       4) "details": the answer object as JSON
       5) "cost"   : usage.cost as a float (0.0 if not reported)
@@ -47,7 +47,9 @@ class OpenRouterDecisionNode:
             "required": {
                 "api_key": ("STRING", {"multiline": False, "default": ""}),
                 "model": (cls.fetch_openrouter_models(),),
+                "question_type": (["noul", "choice", "score"],),
                 "instructions": ("STRING", {"multiline": True, "default": ""}),
+                "criteria": ("STRING", {"multiline": True, "default": ""}),
                 "true_guidance": ("STRING", {"multiline": True, "default": ""}),
                 "false_guidance": ("STRING", {"multiline": True, "default": ""}),
                 "state_text": ("STRING", {"multiline": True, "default": ""}),
@@ -92,27 +94,49 @@ class OpenRouterDecisionNode:
         return cls.models_cache
 
     @staticmethod
-    def build_payload(model, instructions, true_guidance, false_guidance, state_text):
+    def build_payload(model, question_type, instructions, criteria, true_guidance, false_guidance, state_text):
+        lines = [line.strip() for line in criteria.splitlines() if line.strip()]
+        if question_type == "noul":
+            criteria = {"true": true_guidance, "false": false_guidance}
+        elif question_type == "choice":
+            criteria = {}
+            for line in lines:
+                name, colon, guidance = line.partition(":")
+                name = name.strip()
+                if name in criteria:
+                    raise RuntimeError(f"Duplicate option '{name}' in criteria")
+                criteria[name] = guidance.strip() if colon else None
+            if not criteria:
+                raise RuntimeError("Choice questions need at least one option in criteria")
+        else:
+            criteria = lines
+            if not criteria:
+                raise RuntimeError("Score questions need at least one level in criteria")
         return {
             "model": model,
-            "questions": {QUESTION_NAME: {
-                "type": "noul",
-                "instructions": instructions,
-                "criteria": {"true": true_guidance, "false": false_guidance},
-            }},
+            "questions": {QUESTION_NAME: {"type": question_type, "instructions": instructions, "criteria": criteria}},
             "state": [state_text] if state_text else [],
         }
 
     @staticmethod
-    def parse_answer(result, threshold):
+    def parse_answer(result, payload, threshold):
+        question = payload["questions"][QUESTION_NAME]
         answer = result["answers"][QUESTION_NAME]
-        value = float(answer["noul"])
-        passed = value >= threshold
+        if question["type"] == "noul":
+            value = float(answer["noul"])
+            text = "true" if value >= threshold else "false"
+        elif question["type"] == "choice":
+            value = float(answer["confidence"])
+            text = answer["choice"]
+        else:
+            top = len(question["criteria"]) - 1
+            value = float(answer["score"]) / top if top else 0.0
+            text = answer["legend"][str(min(max(int(answer["score"] + 0.5), 0), top))]
         cost = (result.get("usage") or {}).get("cost") or 0.0
-        return ("true" if passed else "false", value, passed, json.dumps(answer), cost)
+        return (text, value, value >= threshold, json.dumps(answer), cost)
 
-    async def decide(self, api_key, model, instructions, true_guidance, false_guidance, state_text,
-                     threshold, request_timeout, retries):
+    async def decide(self, api_key, model, question_type, instructions, criteria, true_guidance, false_guidance,
+                     state_text, threshold, request_timeout, retries):
         api_key = shared.get_api_key(api_key)
         if not api_key:
             raise RuntimeError("API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json")
@@ -120,9 +144,9 @@ class OpenRouterDecisionNode:
             request_timeout, self.min_request_timeout, self.max_request_timeout, self.default_request_timeout)
         base = urlsplit(shared.BASE_URL)
         url = f"{base.scheme}://{base.netloc}/api/alpha/decisions"
-        payload = self.build_payload(model, instructions, true_guidance, false_guidance, state_text)
+        payload = self.build_payload(model, question_type, instructions, criteria, true_guidance, false_guidance, state_text)
         result = await shared.post_with_retries(url, api_key, payload, timeout, retries, "Decision")
-        return self.parse_answer(result, threshold)
+        return self.parse_answer(result, payload, threshold)
 
 
 NODE_CLASS_MAPPINGS = {
