@@ -156,11 +156,9 @@ class OpenRouterImageGenNode:
             "seed": seed,
         }
 
-        # Pass image dimensions via provider data when a specific size is requested
-        size_tuple = shared.parse_image_size(aspect_ratio, image_resolution)
-        if size_tuple:
-            w, h = size_tuple
-            data["provider"] = {"data": {"size": f"{w}x{h}"}}
+        image_config = shared.build_image_config(aspect_ratio, image_resolution)
+        if image_config:
+            data["image_config"] = image_config
 
         url = f"{shared.BASE_URL}/chat/completions"
 
@@ -225,7 +223,7 @@ class OpenRouterImageGenNode:
 
             stats = shared.build_stats_text(
                 tps, prompt_tokens, completion_tokens, 0.0, modified_model,
-                extra_parts=[f"Size: {size_tuple[0]}x{size_tuple[1]}"] if size_tuple else None
+                extra_parts=[f"Size: {image_tensor.shape[2]}x{image_tensor.shape[1]}"]
             )
             credits = shared.fetch_credits(api_key, validated_timeout)
             return (image_tensor, stats, credits)

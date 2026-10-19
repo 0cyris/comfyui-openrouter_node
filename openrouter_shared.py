@@ -12,7 +12,6 @@ import time
 import base64
 import io
 import os
-import re
 import numpy as np
 import torch
 import tiktoken
@@ -47,7 +46,6 @@ ASPECT_RATIO_OPTIONS = [
     "8:1 (google/gemini-3.1-flash-image-preview (Nano Banana 2) only)",
 ]
 IMAGE_RESOLUTION_OPTIONS = ["1K", "2K", "4K"]
-RESOLUTION_MULTIPLIERS = {"1K": 1, "2K": 2, "4K": 4}
 
 AUDIO_FORMAT_OPTIONS = ("mp3", "pcm", "wav", "opus", "aac", "flac")
 
@@ -473,22 +471,20 @@ def base64_to_image(base64_str):
 
 # ── Image size parsing ────────────────────────────────────────────────────────
 
-def parse_image_size(aspect_ratio, image_resolution):
+def build_image_config(aspect_ratio, image_resolution):
     """
-    Parses pixel dimensions from an ASPECT_RATIO_OPTIONS dropdown value and
-    applies the IMAGE_RESOLUTION_OPTIONS multiplier.
+    Builds the chat-completions image_config from the ASPECT_RATIO_OPTIONS and
+    IMAGE_RESOLUTION_OPTIONS dropdown values, e.g. "2:3 (832x1248)" + "2K" ->
+    {"aspect_ratio": "2:3", "image_size": "2K"}.
 
-    Returns (width, height) or None for "auto" / entries without pixel dims.
+    Returns None for the defaults ("auto", "1K") so nothing extra is sent.
     """
-    if aspect_ratio == "auto":
-        return None
-    match = re.search(r'\((\d+)x(\d+)\)', aspect_ratio)
-    if not match:
-        return None  # Gemini-specific ratios without pixel dims
-    base_w = int(match.group(1))
-    base_h = int(match.group(2))
-    mult = RESOLUTION_MULTIPLIERS.get(image_resolution, 1)
-    return (base_w * mult, base_h * mult)
+    config = {}
+    if aspect_ratio != "auto":
+        config["aspect_ratio"] = aspect_ratio.split(" ", 1)[0]
+    if image_resolution != "1K":
+        config["image_size"] = image_resolution
+    return config or None
 
 
 # ── Token counting ────────────────────────────────────────────────────────────
