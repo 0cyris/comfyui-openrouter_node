@@ -350,6 +350,12 @@ class ChoiceOutputTests(unittest.TestCase):
         self.assertEqual((answer, value, passed), ("left", 0.4, False))
 
 
+    def test_confidence_falls_back_to_chosen_option_probability(self):
+        body = {"answers": {"decision": {"type": "choice", "choice": "left", "probabilities": {"left": 0.8, "right": 0.2}}}}
+        answer, value, _, _, _, *_ = run_with(body, question_type="choice", criteria="left\nright")[0]
+        self.assertEqual((answer, value), ("left", 0.8))
+
+
 class ScoreOutputTests(unittest.TestCase):
     legend = {"0": "bad", "1": "ok", "2": "good", "3": "great"}
 
@@ -366,6 +372,11 @@ class ScoreOutputTests(unittest.TestCase):
         self.assertEqual(self.run_score(1.4)[0], "ok")
         self.assertEqual(self.run_score(1.6)[0], "good")
         self.assertEqual(self.run_score(2.99)[0], "great")
+
+    def test_answer_without_legend_uses_criteria_text(self):
+        body = {"answers": {"decision": {"type": "score", "score": 1.6}}}
+        answer, value, _, _, _, *_ = run_with(body, question_type="score", criteria="bad\nok\ngood\ngreat")[0]
+        self.assertEqual((answer, value), ("good", 1.6 / 3))
 
     def test_threshold_boundary_is_inclusive(self):
         self.assertTrue(self.run_score(1.5, threshold=0.5)[2])

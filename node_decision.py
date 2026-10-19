@@ -86,13 +86,13 @@ class OpenRouterDecisionNode:
             "required": {
                 "api_key": ("STRING", {"multiline": False, "default": ""}),
                 "model": (cls.fetch_openrouter_models(),),
-                "question_type": (["noul", "choice", "score"],),
-                "instructions": ("STRING", {"multiline": True, "default": ""}),
-                "criteria": ("STRING", {"multiline": True, "default": ""}),
-                "true_guidance": ("STRING", {"multiline": True, "default": ""}),
-                "false_guidance": ("STRING", {"multiline": True, "default": ""}),
-                "state_text": ("STRING", {"multiline": True, "default": ""}),
-                "threshold": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "question_type": (["noul", "choice", "score"], {"tooltip": "noul: yes/no probability. choice: pick one of the options in criteria. score: position on the ordered levels in criteria."}),
+                "instructions": ("STRING", {"multiline": True, "default": "", "placeholder": "The question, e.g. Which direction does the character face?", "tooltip": "The question to ask about the state."}),
+                "criteria": ("STRING", {"multiline": True, "default": "", "placeholder": "choice: one option per line as name: guidance\nscore: one level per line, lowest first", "tooltip": "choice: one option per line as 'name: guidance' (guidance is optional). score: one level per line, lowest first."}),
+                "true_guidance": ("STRING", {"multiline": True, "default": "", "placeholder": "When the answer is true, e.g. faces viewer-left", "tooltip": "noul only: what makes the answer true."}),
+                "false_guidance": ("STRING", {"multiline": True, "default": "", "placeholder": "When the answer is false, e.g. faces viewer-right or the camera", "tooltip": "noul only: what makes the answer false."}),
+                "state_text": ("STRING", {"multiline": True, "default": "", "placeholder": "Context in words, e.g. a profile view of the character", "tooltip": "Text context sent before the images."}),
+                "threshold": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "value >= threshold sets passed, and the noul answer."}),
                 "request_timeout": ("INT", {
                     "default": cls.default_request_timeout,
                     "min": cls.min_request_timeout,
@@ -103,7 +103,7 @@ class OpenRouterDecisionNode:
                 "retries": ("INT", {"default": 1, "min": 0, "max": 5}),
             },
             "optional": {
-                "candidates": ("IMAGE",),
+                "candidates": ("IMAGE", {"tooltip": "Each frame is judged in its own request; the best one is returned as best_index and best_image."}),
             },
             # image_1..image_N are added dynamically by openrouter_dynamic_inputs.js
         }
@@ -171,12 +171,12 @@ class OpenRouterDecisionNode:
             value = float(answer["noul"])
             text = "true" if value >= threshold else "false"
         elif question["type"] == "choice":
-            value = float(answer["confidence"])
             text = answer["choice"]
+            value = float(answer["confidence"] if "confidence" in answer else answer["probabilities"][text])
         else:
             top = len(question["criteria"]) - 1
             value = float(answer["score"]) / top if top else 0.0
-            text = answer["legend"][str(min(max(int(answer["score"] + 0.5), 0), top))]
+            text = question["criteria"][min(max(int(answer["score"] + 0.5), 0), top)]
         cost = (result.get("usage") or {}).get("cost") or 0.0
         return (text, value, value >= threshold, answer, cost)
 

@@ -246,3 +246,40 @@ app.registerExtension({
         return nodeType;
     },
 })
+
+// Decision node shows only the criteria fields that apply to the selected question type
+app.registerExtension({
+    name: 'OpenRouter.DecisionQuestionType',
+    async beforeRegisterNodeDef(nodeType, nodeData, app) {
+        if (nodeData.name !== "OpenRouterDecisionNode") {
+            return
+        }
+
+        const showFieldsForType = (node) => {
+            const noul = node.widgets.find(w => w.name === "question_type").value === "noul";
+            for (const widget of node.widgets) {
+                if (widget.name === "true_guidance" || widget.name === "false_guidance") {
+                    widget.hidden = !noul;
+                } else if (widget.name === "criteria") {
+                    widget.hidden = noul;
+                }
+            }
+            node.setSize([node.size[0], node.computeSize()[1]]);
+        };
+
+        const onNodeCreated = nodeType.prototype.onNodeCreated;
+        nodeType.prototype.onNodeCreated = function () {
+            const me = onNodeCreated?.apply(this);
+            this.widgets.find(w => w.name === "question_type").callback = () => showFieldsForType(this);
+            showFieldsForType(this);
+            return me;
+        }
+
+        const onConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function () {
+            const me = onConfigure?.apply(this, arguments);
+            showFieldsForType(this);
+            return me;
+        }
+    },
+})
