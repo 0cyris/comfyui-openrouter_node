@@ -115,6 +115,9 @@ class SplitTests(unittest.TestCase):
             "three": {"n": {"type": "range", "min": 1, "max": 3}},
             "no_n": {},
         }
+        offline = patch.object(node_module.requests, "get", side_effect=node_module.requests.ConnectionError)
+        offline.start()
+        self.addCleanup(offline.stop)
 
     def tearDown(self):
         Node.model_params = self.old_params
@@ -178,6 +181,89 @@ class ReferenceTests(unittest.TestCase):
                          [f"data:image/png;base64,{b}" for b in expected])
         self.assertTrue(all(r["type"] == "image_url" for r in refs))
         self.assertEqual(len(set(expected)), 4)
+
+
+class EndpointTests(unittest.TestCase):
+    def setUp(self):
+        self.old_params, self.old_cache = Node.model_params, Node.endpoints_cache
+        Node.model_params = {"m": {"aspect_ratio": {"type": "enum"}, "resolution": {"type": "enum"},
+                                   "n": {"type": "range", "min": 1, "max": 1}}}
+        Node.endpoints_cache = {}
+        self.addCleanup(setattr, Node, "model_params", self.old_params)
+        self.addCleanup(setattr, Node, "endpoints_cache", self.old_cache)
+
+    @staticmethod
+    def endpoint(tag, resolutions, references=14):
+        return {"provider_tag": tag, "supported_parameters": {
+            "resolution": {"type": "enum", "values": resolutions},
+            "aspect_ratio": {"type": "enum", "values": ["1:1", "16:9"]},
+            "n": {"type": "range", "min": 1, "max": 1},
+            "input_references": {"type": "range", "min": 0, "max": references}}}
+
+    def run_generate(self, endpoints, get=None, **kwargs):
+        get = get or Mock(return_value=make_response(body={"id": "m", "endpoints": endpoints}))
+        sent = []
+
+        def fake_post(url, **post_kwargs):
+            sent.append(post_kwargs["json"])
+            return make_response(body={"data": [{"b64_json": png_b64(4, 4)}]})
+
+        with patch.object(node_module.requests, "get", get), \
+                patch.object(node_module.requests, "post", side_effect=fake_post), \
+                patch.object(shared, "fetch_credits", return_value=""):
+            try:
+                generate("key", "p", "m", **kwargs)
+            except RuntimeError as e:
+                return sent, get, e
+        return sent, get, None
+
+    def test_all_compatible_sends_without_provider(self):
+        sent, get, error = self.run_generate([self.endpoint("a", ["1K", "2K"]), self.endpoint("b", ["2K"])],
+                                             resolution="2K", aspect_ratio="16:9", n=2)
+        self.assertIsNone(error)
+        self.assertEqual(len(sent), 2)
+        self.assertTrue(all("provider" not in p for p in sent))
+        self.assertTrue(get.call_args.args[0].endswith("/images/models/m/endpoints"))
+
+    def test_some_compatible_restricts_every_chunk_to_those_providers(self):
+        endpoints = [self.endpoint("a", ["1K"]), self.endpoint("b", ["1K", "2K"]), self.endpoint("c", ["2K"])]
+        sent, _, error = self.run_generate(endpoints, resolution="2K", n=2)
+        self.assertIsNone(error)
+        self.assertEqual(len(sent), 2)
+        self.assertTrue(all(p["provider"] == {"only": ["b", "c"]} for p in sent))
+
+    def test_none_compatible_raises_before_any_post(self):
+        sent, _, error = self.run_generate([self.endpoint("a", ["512", "1K"]), self.endpoint("b", ["1K", "2K"])],
+                                           resolution="768")
+        self.assertEqual(sent, [])
+        self.assertEqual(str(error), "m does not accept resolution=768 (allowed: 512, 1K, 2K)")
+
+    def test_fetch_failure_sends_without_check(self):
+        get = Mock(side_effect=node_module.requests.ConnectionError("down"))
+        sent, _, error = self.run_generate([], get=get, resolution="768")
+        self.assertIsNone(error)
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn("provider", sent[0])
+
+    def test_reference_count_over_endpoint_max(self):
+        endpoints = [self.endpoint("a", ["1K"], references=1), self.endpoint("b", ["1K"], references=2)]
+        images = {"image_1": torch.zeros((1, 8, 8, 3)), "image_2": torch.ones((1, 8, 8, 3))}
+        sent, _, error = self.run_generate(endpoints, **images)
+        self.assertIsNone(error)
+        self.assertEqual(sent[0]["provider"], {"only": ["b"]})
+        images["image_3"] = torch.full((1, 8, 8, 3), 0.5)
+        sent, _, error = self.run_generate(endpoints, **images)
+        self.assertEqual(sent, [])
+        self.assertEqual(str(error), "m does not accept input_references=3 (allowed: 0-1, 0-2)")
+
+    def test_endpoints_are_cached(self):
+        endpoints = [self.endpoint("a", ["1K"])]
+        _, get, _ = self.run_generate(endpoints)
+        _, get, _ = self.run_generate(endpoints, get=get)
+        self.assertEqual(get.call_count, 1)
+        Node.endpoints_cache["m"] = (Node.endpoints_cache["m"][0] - Node.cache_duration - 1, endpoints)
+        self.run_generate(endpoints, get=get)
+        self.assertEqual(get.call_count, 2)
 
 
 class ResponseTests(unittest.TestCase):
@@ -312,6 +398,9 @@ class RetryTests(unittest.TestCase):
         old_params = Node.model_params
         Node.model_params = {"single": {"n": {"type": "range", "min": 1, "max": 1}, "seed": {"type": "boolean"}}}
         self.addCleanup(setattr, Node, "model_params", old_params)
+        offline = patch.object(node_module.requests, "get", side_effect=node_module.requests.ConnectionError)
+        offline.start()
+        self.addCleanup(offline.stop)
         failed = []
 
         def fake_post(url, **kwargs):

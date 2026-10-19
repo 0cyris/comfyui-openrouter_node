@@ -10,6 +10,7 @@ import asyncio
 import base64
 import io
 import time
+from urllib.parse import quote
 
 import numpy as np
 import requests
@@ -22,6 +23,7 @@ from . import openrouter_shared as shared
 
 RETRY_STATUSES = (408, 429, 500, 502, 503, 504)
 OPTIONAL_PARAMS = ("n", "seed", "aspect_ratio", "resolution", "quality", "background", "output_format")
+ENUM_CHECKS = ("aspect_ratio", "resolution", "quality", "background")
 
 
 class OpenRouterImageAPINode:
@@ -38,6 +40,7 @@ class OpenRouterImageAPINode:
 
     models_cache = None
     model_params = {}
+    endpoints_cache = {}
     last_fetch_time = 0
     cache_duration = shared.CACHE_DURATION
     default_request_timeout = shared.DEFAULT_REQUEST_TIMEOUT
@@ -159,6 +162,57 @@ class OpenRouterImageAPINode:
             return 1
         return supported["n"].get("max", 10)
 
+    @classmethod
+    def fetch_endpoints(cls, model, api_key):
+        """Per-provider endpoints and supported_parameters via GET /api/v1/images/models/{id}/endpoints."""
+        cached = cls.endpoints_cache.get(model)
+        if cached and time.time() - cached[0] <= cls.cache_duration:
+            return cached[1]
+        response = requests.get(
+            f"{shared.BASE_URL}/images/models/{quote(model, safe='/')}/endpoints",
+            headers=shared.build_standard_headers(api_key),
+            timeout=shared.DEFAULT_REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        endpoints = response.json()["endpoints"]
+        cls.endpoints_cache[model] = (time.time(), endpoints)
+        return endpoints
+
+    @staticmethod
+    def accepts(descriptor, value):
+        """Whether an endpoint descriptor takes the value. A missing descriptor does not; unknown types do."""
+        if descriptor is None:
+            return False
+        if descriptor.get("type") == "enum":
+            return value in descriptor.get("values", [])
+        if descriptor.get("type") == "range":
+            return descriptor.get("min", value) <= value <= descriptor.get("max", value)
+        return True
+
+    @staticmethod
+    def allowed_values(endpoints, key):
+        allowed = []
+        for endpoint in endpoints:
+            descriptor = endpoint["supported_parameters"].get(key) or {}
+            if descriptor.get("type") == "enum":
+                allowed.extend(map(str, descriptor.get("values", [])))
+            elif descriptor.get("type") == "range":
+                allowed.append(f"{descriptor.get('min')}-{descriptor.get('max')}")
+        return ", ".join(dict.fromkeys(allowed)) or "not supported"
+
+    @classmethod
+    def route_endpoints(cls, model, checks, endpoints):
+        """Returns provider tags to restrict routing to, None if every endpoint accepts the checks. Raises if none do."""
+        compatible = [e for e in endpoints if all(cls.accepts(e["supported_parameters"].get(k), v) for k, v in checks)]
+        if len(compatible) == len(endpoints):
+            return None
+        if not compatible:
+            failed = [(k, v) for k, v in checks
+                      if not any(cls.accepts(e["supported_parameters"].get(k), v) for e in endpoints)] or checks
+            raise RuntimeError(f"{model} does not accept " + ", ".join(
+                f"{k}={v} (allowed: {cls.allowed_values(endpoints, k)})" for k, v in failed))
+        return sorted({e["provider_tag"] for e in compatible} - {e["provider_tag"] for e in endpoints if e not in compatible})
+
     @staticmethod
     async def post_request(api_key, payload, timeout, retries=0):
         for attempt in range(retries + 1):
@@ -247,6 +301,21 @@ class OpenRouterImageAPINode:
         dropped = [self.drop_unsupported(p) for p in payloads][0]
         if dropped:
             print(f"[ImageAPINode] {model} does not support: {', '.join(dropped)}. Not sending.")
+        if model in self.model_params:
+            try:
+                endpoints = await asyncio.to_thread(self.fetch_endpoints, model, api_key)
+            except (requests.RequestException, KeyError, ValueError) as e:
+                print(f"[ImageAPINode] Endpoint check skipped for {model}: {e}")
+            else:
+                checks = [(k, payloads[0][k]) for k in ENUM_CHECKS if k in payloads[0]]
+                checks += [("n", count) for count in sorted({p["n"] for p in payloads if "n" in p})]
+                if references:
+                    checks.append(("input_references", len(references)))
+                providers = self.route_endpoints(model, checks, endpoints)
+                if providers:
+                    print(f"[ImageAPINode] Routing {model} to: {', '.join(providers)}")
+                    for p in payloads:
+                        p["provider"] = {"only": providers}
         print(f"[ImageAPINode] Request: model={model} n={n} calls={len(payloads)} aspect_ratio={aspect_ratio} "
               f"resolution={resolution} references={len(references)}")
 
