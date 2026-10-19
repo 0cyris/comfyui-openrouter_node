@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import sys
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -164,6 +165,154 @@ class ContextImageTests(unittest.TestCase):
             self.assertEqual(len(post.call_args.kwargs["json"]["state"]), 2)
 
 
+LEVELS = [0.1, 0.4, 0.7, 0.9]
+
+
+def candidates(count=3, width=640, height=480):
+    return torch.stack([torch.full((height, width, 3), LEVELS[i]) for i in range(count)])
+
+
+def candidate_index(payload):
+    part = payload["state"][-1]
+    pixel = Image.open(io.BytesIO(base64.b64decode(part["image_url"]["url"].split(",", 1)[1]))).getpixel((10, 10))[0]
+    return min(range(len(LEVELS)), key=lambda i: abs(LEVELS[i] * 255 - pixel))
+
+
+def per_candidate_post(responses, barrier=None):
+    """Mocked requests.post that answers each request from the queue of the candidate it carries."""
+    sent = []
+
+    def post(url, headers, json, timeout):
+        index = candidate_index(json)
+        sent.append(index)
+        if barrier:
+            barrier.wait()
+        return responses[index].pop(0)
+
+    return patch.object(shared.requests, "post", side_effect=post), sent
+
+
+def ok(body):
+    return [make_response(body=body)]
+
+
+class CandidateTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(Node, "model_input_modalities", {"m": ["text", "image"], "text-only": ["text"]})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        async def no_sleep(seconds):
+            pass
+        patcher = patch.object(shared.asyncio, "sleep", new=no_sleep)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_batch(self, noul_values, usages=None, **overrides):
+        usages = usages or [None] * len(noul_values)
+        responses = [ok(answer_body(v, **({"usage": {"cost": u}} if u is not None else {}))) for v, u in zip(noul_values, usages)]
+        patcher, sent = per_candidate_post(responses)
+        with patcher as post:
+            outputs = decide(candidates=candidates(len(noul_values)), **overrides)
+        return outputs, post, sent
+
+    def test_one_request_per_candidate_with_text_context_then_candidate(self):
+        _, post, sent = self.run_batch([0.2, 0.9, 0.5], image_1=frames(1, 640, 480), image_2=frames(1, 320, 300))
+        self.assertEqual(post.call_count, 3)
+        self.assertEqual(sorted(sent), [0, 1, 2])
+        for call in post.call_args_list:
+            state = call.kwargs["json"]["state"]
+            self.assertEqual(state[0], "the text")
+            self.assertEqual([decode_part(part) for part in state[1:]], [(640, 480), (320, 300), (640, 480)])
+
+    def test_candidate_scaled_like_context_images(self):
+        patcher, _ = per_candidate_post([ok(answer_body(0.5))])
+        with patcher as post:
+            decide(candidates=candidates(1, 100, 50))
+        self.assertEqual(decode_part(post.call_args.kwargs["json"]["state"][-1]), (512, 256))
+
+    def test_requests_run_concurrently(self):
+        patcher, _ = per_candidate_post([ok(answer_body(v)) for v in (0.2, 0.9, 0.5)], barrier=threading.Barrier(3, timeout=5))
+        with patcher:
+            self.assertEqual(decide(candidates=candidates(3))[1], 0.9)
+
+    def test_best_is_highest_value(self):
+        (answer, value, passed, _, _, best_index, _), _, _ = self.run_batch([0.2, 0.9, 0.5])
+        self.assertEqual((answer, value, passed, best_index), ("true", 0.9, True, 1))
+
+    def test_tie_picks_lowest_index(self):
+        outputs, _, _ = self.run_batch([0.3, 0.8, 0.8])
+        self.assertEqual(outputs[5], 1)
+
+    def test_best_image_is_original_frame(self):
+        outputs, _, _ = self.run_batch([0.2, 0.9, 0.5])
+        self.assertTrue(torch.equal(outputs[6], candidates(3)[1:2]))
+
+    def test_best_image_keeps_original_size(self):
+        patcher, _ = per_candidate_post([ok(answer_body(0.5))])
+        with patcher:
+            outputs = decide(candidates=candidates(1, 100, 50))
+        self.assertEqual(outputs[6].shape, (1, 50, 100, 3))
+
+    def test_details_is_array_in_candidate_order(self):
+        outputs, _, _ = self.run_batch([0.2, 0.9, 0.5])
+        self.assertEqual([d["noul"] for d in json.loads(outputs[3])], [0.2, 0.9, 0.5])
+
+    def test_cost_is_summed_with_missing_usage_as_zero(self):
+        outputs, _, _ = self.run_batch([0.2, 0.9, 0.5], usages=[0.00001, None, 0.00002])
+        self.assertAlmostEqual(outputs[4], 0.00003)
+
+    def test_failing_candidate_retries_on_its_own(self):
+        responses = [ok(answer_body(0.2)),
+                     [make_response(503, {"error": {"message": "busy"}}), make_response(body=answer_body(0.9))],
+                     ok(answer_body(0.5))]
+        patcher, sent = per_candidate_post(responses)
+        with patcher:
+            outputs = decide(candidates=candidates(3))
+        self.assertEqual(sorted(sent), [0, 1, 1, 2])
+        self.assertEqual((outputs[1], outputs[5]), (0.9, 1))
+
+    def test_permanently_failing_candidate_raises(self):
+        responses = [ok(answer_body(0.2)), [make_response(400, {"error": {"message": "bad image"}})], ok(answer_body(0.5))]
+        patcher, _ = per_candidate_post(responses)
+        with patcher:
+            with self.assertRaisesRegex(RuntimeError, "OpenRouter Decision error 400: bad image"):
+                decide(candidates=candidates(3))
+
+    def test_no_candidates_is_a_single_request(self):
+        outputs, post = run_with(answer_body(0.8, usage={"cost": 0.00002}))
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(outputs[:5], ("true", 0.8, True, json.dumps({"type": "noul", "noul": 0.8}), 0.00002))
+        self.assertEqual(outputs[5], 0)
+        self.assertEqual(outputs[6].shape, (1, 64, 64, 3))
+        self.assertEqual(outputs[6].dtype, torch.float32)
+
+    def test_text_only_model_with_candidates_raises_without_request(self):
+        with patch.object(shared.requests, "post") as post:
+            with self.assertRaisesRegex(RuntimeError, "text-only does not accept images"):
+                decide(model="text-only", candidates=candidates(2))
+        post.assert_not_called()
+
+    def test_invalid_criteria_raises_without_request(self):
+        with patch.object(shared.requests, "post") as post:
+            with self.assertRaisesRegex(RuntimeError, "at least one option"):
+                decide(question_type="choice", criteria="", candidates=candidates(2))
+        post.assert_not_called()
+
+    def test_choice_candidates_pick_highest_confidence(self):
+        patcher, _ = per_candidate_post([ok(choice_body("a", 0.4, {})), ok(choice_body("b", 0.95, {})), ok(choice_body("a", 0.6, {}))])
+        with patcher:
+            outputs = decide(question_type="choice", criteria="a\nb", candidates=candidates(3))
+        self.assertEqual((outputs[0], outputs[1], outputs[5]), ("b", 0.95, 1))
+
+    def test_score_candidates_pick_highest_score(self):
+        legend = {"0": "bad", "1": "ok", "2": "good"}
+        patcher, _ = per_candidate_post([ok(score_body(1.0, legend)), ok(score_body(2.0, legend)), ok(score_body(0.0, legend))])
+        with patcher:
+            outputs = decide(question_type="score", criteria="bad\nok\ngood", candidates=candidates(3))
+        self.assertEqual((outputs[0], outputs[1], outputs[5]), ("good", 1.0, 1))
+
+
 class CriteriaPayloadTests(unittest.TestCase):
     def test_choice_options_from_lines(self):
         criteria = "left: faces viewer-left\n\n  right : faces: viewer-right  \nback\n"
@@ -191,13 +340,13 @@ class CriteriaPayloadTests(unittest.TestCase):
 class ChoiceOutputTests(unittest.TestCase):
     def test_maps_choice_confidence_and_probabilities(self):
         body = choice_body("left", 0.7, {"left": 0.7, "right": 0.3}, usage={"cost": 0.00001})
-        answer, value, passed, details, cost = run_with(body, question_type="choice", criteria="left\nright")[0]
+        answer, value, passed, details, cost, *_ = run_with(body, question_type="choice", criteria="left\nright")[0]
         self.assertEqual((answer, value, passed, cost), ("left", 0.7, True, 0.00001))
         self.assertEqual(json.loads(details)["probabilities"], {"left": 0.7, "right": 0.3})
 
     def test_below_threshold_not_passed(self):
         body = choice_body("left", 0.4, {"left": 0.4, "right": 0.3})
-        answer, value, passed, _, _ = run_with(body, question_type="choice", criteria="left\nright")[0]
+        answer, value, passed, _, _, *_ = run_with(body, question_type="choice", criteria="left\nright")[0]
         self.assertEqual((answer, value, passed), ("left", 0.4, False))
 
 
@@ -209,7 +358,7 @@ class ScoreOutputTests(unittest.TestCase):
                         **overrides)[0]
 
     def test_normalises_score_by_level_count(self):
-        answer, value, passed, details, _ = self.run_score(2.0)
+        answer, value, passed, details, _, *_ = self.run_score(2.0)
         self.assertEqual((answer, value, passed), ("good", 2 / 3, True))
         self.assertEqual(json.loads(details)["score"], 2.0)
 
@@ -224,7 +373,7 @@ class ScoreOutputTests(unittest.TestCase):
 
     def test_single_level_gives_zero(self):
         body = score_body(0.0, {"0": "only"})
-        answer, value, passed, _, _ = run_with(body, question_type="score", criteria="only")[0]
+        answer, value, passed, _, _, *_ = run_with(body, question_type="score", criteria="only")[0]
         self.assertEqual((answer, value, passed), ("only", 0.0, False))
 
 
@@ -247,16 +396,16 @@ class InvalidCriteriaTests(unittest.TestCase):
 
 class OutputTests(unittest.TestCase):
     def test_above_threshold_is_true(self):
-        answer, value, passed, details, cost = run_with(answer_body(0.8))[0]
+        answer, value, passed, details, cost, *_ = run_with(answer_body(0.8))[0]
         self.assertEqual((answer, value, passed), ("true", 0.8, True))
         self.assertEqual(json.loads(details), {"type": "noul", "noul": 0.8})
 
     def test_below_threshold_is_false(self):
-        answer, value, passed, _, _ = run_with(answer_body(0.2))[0]
+        answer, value, passed, _, _, *_ = run_with(answer_body(0.2))[0]
         self.assertEqual((answer, value, passed), ("false", 0.2, False))
 
     def test_threshold_boundary_is_inclusive(self):
-        answer, value, passed, _, _ = run_with(answer_body(0.75), threshold=0.75)[0]
+        answer, value, passed, _, _, *_ = run_with(answer_body(0.75), threshold=0.75)[0]
         self.assertEqual((answer, passed), ("true", True))
 
     def test_cost_from_usage(self):

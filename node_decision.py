@@ -14,6 +14,7 @@ import time
 from urllib.parse import urlsplit
 
 import requests
+import torch
 from PIL import Image
 
 from . import openrouter_shared as shared
@@ -53,12 +54,17 @@ class OpenRouterDecisionNode:
     """
     ComfyUI node for the OpenRouter Decisions API.
 
-    Returns five outputs:
-      1) "answer" : "true"/"false" by threshold (noul), the chosen option (choice) or the nearest level's legend text (score)
-      2) "value"  : probability of true (noul), confidence (choice) or score / (levels - 1) (score)
-      3) "passed" : value >= threshold
-      4) "details": the answer object as JSON
-      5) "cost"   : usage.cost as a float (0.0 if not reported)
+    Each frame of the optional "candidates" batch is judged in its own concurrent request, after the text and
+    context images. Without candidates there is one request.
+
+    Returns seven outputs; the first three describe the candidate with the highest value (the lowest index on a tie):
+      1) "answer"    : "true"/"false" by threshold (noul), the chosen option (choice) or the nearest level's legend text (score)
+      2) "value"     : probability of true (noul), confidence (choice) or score / (levels - 1) (score)
+      3) "passed"    : value >= threshold
+      4) "details"   : the answer object as JSON, or a JSON array of every candidate's answer in order
+      5) "cost"      : usage.cost summed over all requests (0.0 if not reported)
+      6) "best_index": index of that candidate (0 without candidates)
+      7) "best_image": that candidate's original frame (a black 64x64 placeholder without candidates)
     Errors raise RuntimeError so ComfyUI shows them and caches nothing.
     """
 
@@ -96,11 +102,14 @@ class OpenRouterDecisionNode:
                 }),
                 "retries": ("INT", {"default": 1, "min": 0, "max": 5}),
             },
+            "optional": {
+                "candidates": ("IMAGE",),
+            },
             # image_1..image_N are added dynamically by openrouter_dynamic_inputs.js
         }
 
-    RETURN_TYPES = ("STRING", "FLOAT", "BOOLEAN", "STRING", "FLOAT")
-    RETURN_NAMES = ("answer", "value", "passed", "details", "cost")
+    RETURN_TYPES = ("STRING", "FLOAT", "BOOLEAN", "STRING", "FLOAT", "INT", "IMAGE")
+    RETURN_NAMES = ("answer", "value", "passed", "details", "cost", "best_index", "best_image")
 
     FUNCTION = "decide"
     CATEGORY = "LLM"
@@ -169,10 +178,10 @@ class OpenRouterDecisionNode:
             value = float(answer["score"]) / top if top else 0.0
             text = answer["legend"][str(min(max(int(answer["score"] + 0.5), 0), top))]
         cost = (result.get("usage") or {}).get("cost") or 0.0
-        return (text, value, value >= threshold, json.dumps(answer), cost)
+        return (text, value, value >= threshold, answer, cost)
 
     async def decide(self, api_key, model, question_type, instructions, criteria, true_guidance, false_guidance,
-                     state_text, threshold, request_timeout, retries, **kwargs):
+                     state_text, threshold, request_timeout, retries, candidates=None, **kwargs):
         api_key = shared.get_api_key(api_key)
         if not api_key:
             raise RuntimeError("API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json")
@@ -180,16 +189,25 @@ class OpenRouterDecisionNode:
             request_timeout, self.min_request_timeout, self.max_request_timeout, self.default_request_timeout)
         connected = [kwargs[k] for k in sorted((k for k in kwargs if k.startswith("image_")), key=lambda x: int(x.split("_")[1]))
                      if kwargs[k] is not None]
-        if connected and model in self.model_input_modalities and "image" not in self.model_input_modalities[model]:
+        if (connected or candidates is not None) and model in self.model_input_modalities and "image" not in self.model_input_modalities[model]:
             raise RuntimeError(f"{model} does not accept images")
-        images = []
+        context = []
         for batch in connected:
-            images.extend(await asyncio.to_thread(image_batch_to_jpeg_base64_list, batch))
+            context.extend(await asyncio.to_thread(image_batch_to_jpeg_base64_list, batch))
+        frames = [[]] if candidates is None else [[b64] for b64 in await asyncio.to_thread(image_batch_to_jpeg_base64_list, candidates)]
         base = urlsplit(shared.BASE_URL)
         url = f"{base.scheme}://{base.netloc}/api/alpha/decisions"
-        payload = self.build_payload(model, question_type, instructions, criteria, true_guidance, false_guidance, state_text, images)
-        result = await shared.post_with_retries(url, api_key, payload, timeout, retries, "Decision")
-        return self.parse_answer(result, payload, threshold)
+        payloads = [self.build_payload(model, question_type, instructions, criteria, true_guidance, false_guidance, state_text, context + frame)
+                    for frame in frames]
+        results = await asyncio.gather(*(shared.post_with_retries(url, api_key, payload, timeout, retries, "Decision") for payload in payloads))
+        parsed = [self.parse_answer(result, payload, threshold) for result, payload in zip(results, payloads)]
+        best = max(range(len(parsed)), key=lambda i: parsed[i][1])
+        text, value, passed, _, _ = parsed[best]
+        if candidates is None:
+            details, best_image = parsed[0][3], torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+        else:
+            details, best_image = [p[3] for p in parsed], candidates[best:best + 1].clone()
+        return (text, value, passed, json.dumps(details), sum(p[4] for p in parsed), best, best_image)
 
 
 NODE_CLASS_MAPPINGS = {
