@@ -21,7 +21,6 @@ import comfy.utils
 
 from . import openrouter_shared as shared
 
-RETRY_STATUSES = (408, 429, 500, 502, 503, 504)
 OPTIONAL_PARAMS = ("n", "seed", "aspect_ratio", "resolution", "quality", "background", "output_format")
 ENUM_CHECKS = ("aspect_ratio", "resolution", "quality", "background")
 
@@ -214,49 +213,6 @@ class OpenRouterImageAPINode:
         return sorted({e["provider_tag"] for e in compatible} - {e["provider_tag"] for e in endpoints if e not in compatible})
 
     @staticmethod
-    async def post_request(api_key, payload, timeout, retries=0):
-        for attempt in range(retries + 1):
-            try:
-                response = await asyncio.to_thread(
-                    requests.post,
-                    f"{shared.BASE_URL}/images",
-                    headers=shared.build_standard_headers(api_key),
-                    json=payload,
-                    timeout=timeout,
-                )
-            except (requests.Timeout, requests.ConnectionError) as e:
-                error, transient = e, True
-            else:
-                if response.status_code < 400:
-                    return response.json()
-                metadata = {}
-                try:
-                    body = response.json()["error"]
-                    message = body["message"]
-                    metadata = body.get("metadata") or {}
-                except (ValueError, KeyError, TypeError, AttributeError):
-                    message = response.text[:200]
-                details = []
-                if isinstance(metadata, dict):
-                    if metadata.get("provider_name"):
-                        details.append(f"provider: {metadata['provider_name']}")
-                    if metadata.get("reasons"):
-                        reasons = metadata["reasons"]
-                        details.append(f"reasons: {', '.join(map(str, reasons)) if isinstance(reasons, list) else reasons}")
-                    if metadata.get("raw"):
-                        details.append(f"raw: {str(metadata['raw'])[:300]}")
-                    moderated = "reasons" in metadata or "flagged_input" in metadata
-                else:
-                    moderated = False
-                error = RuntimeError(f"OpenRouter Image API error {response.status_code}: {message}"
-                                     + (f" ({'; '.join(details)})" if details else ""))
-                transient = response.status_code in RETRY_STATUSES or moderated or "moderation" in str(message).lower()
-            if not transient or attempt == retries:
-                raise error
-            print(f"[ImageAPINode] Retrying ({attempt + 1}/{retries}) after: {error}")
-            await asyncio.sleep(2 * (attempt + 1))
-
-    @staticmethod
     def decode_images(data):
         if not data:
             raise RuntimeError("OpenRouter returned no images")
@@ -321,7 +277,7 @@ class OpenRouterImageAPINode:
 
         # Async + worker threads let these calls and other independent image nodes run concurrently
         start_time = time.time()
-        results = await asyncio.gather(*(self.post_request(api_key, p, validated_timeout, retries) for p in payloads))
+        results = await asyncio.gather(*(shared.post_with_retries(f"{shared.BASE_URL}/images", api_key, p, validated_timeout, retries, "Image API") for p in payloads))
         elapsed = time.time() - start_time
 
         images = self.decode_images([item for r in results for item in (r.get("data") or [])])
