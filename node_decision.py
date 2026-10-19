@@ -1,19 +1,52 @@
 """
 node_decision.py — OpenRouter Decision Node
 
-Asks one noul, choice or score question about text through
+Asks one noul, choice or score question about text and context images through
 POST /api/alpha/decisions and returns the result as a 0-1 value.
 """
 
+import asyncio
+import base64
+import io
 import json
+import math
 import time
 from urllib.parse import urlsplit
 
 import requests
+from PIL import Image
 
 from . import openrouter_shared as shared
 
 QUESTION_NAME = "decision"
+
+# Accepted image range of every decision model (Jev's limits, the strictest listed)
+MIN_SIDE, MAX_SIDE = 256, 1568
+MIN_PIXELS, MAX_PIXELS = 78400, 2458624
+
+
+def fit_size(width, height):
+    """Scales into the accepted range keeping aspect ratio; sizes already inside it are unchanged."""
+    scale = max(1, MIN_SIDE / min(width, height), math.sqrt(MIN_PIXELS / (width * height)))
+    scale = min(scale, MAX_SIDE / max(width, height), math.sqrt(MAX_PIXELS / (width * height)))
+    if scale == 1:
+        return width, height
+    round_size = math.ceil if scale > 1 else round
+    return round_size(width * scale), round_size(height * scale)
+
+
+def image_batch_to_jpeg_base64_list(images):
+    """Converts every frame of a ComfyUI IMAGE batch (BHWC) to a base64 JPEG fitted to the accepted size range."""
+    encoded = []
+    for frame in images:
+        pil_image = Image.fromarray((frame.clamp(0, 1) * 255).round().byte().cpu().numpy(), "RGB")
+        size = fit_size(*pil_image.size)
+        if size != pil_image.size:
+            pil_image = pil_image.resize(size, Image.LANCZOS)
+        buffered = io.BytesIO()
+        pil_image.save(buffered, format="JPEG", quality=95)
+        encoded.append(base64.b64encode(buffered.getvalue()).decode("utf-8"))
+    return encoded
 
 
 class OpenRouterDecisionNode:
@@ -63,6 +96,7 @@ class OpenRouterDecisionNode:
                 }),
                 "retries": ("INT", {"default": 1, "min": 0, "max": 5}),
             },
+            # image_1..image_N are added dynamically by openrouter_dynamic_inputs.js
         }
 
     RETURN_TYPES = ("STRING", "FLOAT", "BOOLEAN", "STRING", "FLOAT")
@@ -94,7 +128,7 @@ class OpenRouterDecisionNode:
         return cls.models_cache
 
     @staticmethod
-    def build_payload(model, question_type, instructions, criteria, true_guidance, false_guidance, state_text):
+    def build_payload(model, question_type, instructions, criteria, true_guidance, false_guidance, state_text, images):
         lines = [line.strip() for line in criteria.splitlines() if line.strip()]
         if question_type == "noul":
             criteria = {"true": true_guidance, "false": false_guidance}
@@ -115,7 +149,9 @@ class OpenRouterDecisionNode:
         return {
             "model": model,
             "questions": {QUESTION_NAME: {"type": question_type, "instructions": instructions, "criteria": criteria}},
-            "state": [state_text] if state_text else [],
+            "state": ([state_text] if state_text else []) + [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}} for b64 in images
+            ],
         }
 
     @staticmethod
@@ -136,15 +172,22 @@ class OpenRouterDecisionNode:
         return (text, value, value >= threshold, json.dumps(answer), cost)
 
     async def decide(self, api_key, model, question_type, instructions, criteria, true_guidance, false_guidance,
-                     state_text, threshold, request_timeout, retries):
+                     state_text, threshold, request_timeout, retries, **kwargs):
         api_key = shared.get_api_key(api_key)
         if not api_key:
             raise RuntimeError("API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json")
         timeout = shared.validate_request_timeout(
             request_timeout, self.min_request_timeout, self.max_request_timeout, self.default_request_timeout)
+        connected = [kwargs[k] for k in sorted((k for k in kwargs if k.startswith("image_")), key=lambda x: int(x.split("_")[1]))
+                     if kwargs[k] is not None]
+        if connected and model in self.model_input_modalities and "image" not in self.model_input_modalities[model]:
+            raise RuntimeError(f"{model} does not accept images")
+        images = []
+        for batch in connected:
+            images.extend(await asyncio.to_thread(image_batch_to_jpeg_base64_list, batch))
         base = urlsplit(shared.BASE_URL)
         url = f"{base.scheme}://{base.netloc}/api/alpha/decisions"
-        payload = self.build_payload(model, question_type, instructions, criteria, true_guidance, false_guidance, state_text)
+        payload = self.build_payload(model, question_type, instructions, criteria, true_guidance, false_guidance, state_text, images)
         result = await shared.post_with_retries(url, api_key, payload, timeout, retries, "Decision")
         return self.parse_answer(result, payload, threshold)
 

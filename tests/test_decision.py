@@ -1,11 +1,16 @@
 import asyncio
+import base64
 import importlib.util
+import io
 import json
 import sys
 import types
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+
+import torch
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parents[1]))
@@ -67,6 +72,18 @@ def run_with(body, **overrides):
         return decide(**overrides), post
 
 
+def frames(count, width, height):
+    return torch.rand(count, height, width, 3)
+
+
+def decode_part(part):
+    prefix = "data:image/jpeg;base64,"
+    assert part["type"] == "image_url" and part["image_url"]["url"].startswith(prefix), part["type"]
+    image = Image.open(io.BytesIO(base64.b64decode(part["image_url"]["url"][len(prefix):])))
+    assert image.format == "JPEG"
+    return image.size
+
+
 class PayloadTests(unittest.TestCase):
     def test_sends_single_noul_question_to_alpha_endpoint(self):
         _, post = run_with(answer_body(0.9))
@@ -84,6 +101,67 @@ class PayloadTests(unittest.TestCase):
     def test_empty_state_text_sends_empty_state(self):
         _, post = run_with(answer_body(0.9), state_text="")
         self.assertEqual(post.call_args.kwargs["json"]["state"], [])
+
+
+class ContextImageTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(Node, "model_input_modalities", {"m": ["text", "image"], "text-only": ["text"]})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def sent_state(self, **overrides):
+        _, post = run_with(answer_body(0.9), **overrides)
+        return post.call_args.kwargs["json"]["state"]
+
+    def test_state_is_text_then_images_in_socket_order_with_all_frames(self):
+        state = self.sent_state(image_10=frames(1, 600, 400), image_2=frames(2, 320, 300),
+                                image_1=frames(1, 640, 480))
+        self.assertEqual(state[0], "the text")
+        self.assertEqual([decode_part(part) for part in state[1:]],
+                         [(640, 480), (320, 300), (320, 300), (600, 400)])
+
+    def test_images_without_text_are_sent_alone(self):
+        state = self.sent_state(state_text="", image_1=frames(1, 640, 480))
+        self.assertEqual([decode_part(part) for part in state], [(640, 480)])
+
+    def test_unconnected_image_is_skipped(self):
+        state = self.sent_state(image_1=None, image_2=frames(1, 640, 480))
+        self.assertEqual(len(state), 2)
+
+    def test_too_large_image_is_downscaled_keeping_aspect_ratio(self):
+        width, height = decode_part(self.sent_state(image_1=frames(1, 3000, 2000))[1])
+        self.assertEqual((width, height), (1568, 1045))
+        self.assertAlmostEqual(width / height, 3000 / 2000, delta=0.01)
+
+    def test_too_small_image_is_upscaled_keeping_aspect_ratio(self):
+        width, height = decode_part(self.sent_state(image_1=frames(1, 100, 50))[1])
+        self.assertEqual((width, height), (512, 256))
+
+    def test_image_under_minimum_pixel_count_is_upscaled(self):
+        width, height = decode_part(self.sent_state(image_1=frames(1, 260, 260))[1])
+        self.assertGreaterEqual(width * height, 78400)
+        self.assertEqual(width, height)
+
+    def test_in_range_image_keeps_its_size(self):
+        self.assertEqual(decode_part(self.sent_state(image_1=frames(1, 1568, 1568))[1]), (1568, 1568))
+        self.assertEqual(decode_part(self.sent_state(image_1=frames(1, 1000, 300))[1]), (1000, 300))
+
+    def test_text_only_model_with_image_raises_without_request(self):
+        with patch.object(shared.requests, "post") as post:
+            with self.assertRaisesRegex(RuntimeError, "text-only does not accept images"):
+                decide(model="text-only", image_1=frames(1, 640, 480))
+        post.assert_not_called()
+
+    def test_text_only_model_without_images_sends_text_only(self):
+        self.assertEqual(self.sent_state(model="text-only"), ["the text"])
+
+    def test_model_missing_from_catalog_is_not_refused(self):
+        self.assertEqual(len(self.sent_state(model="unlisted", image_1=frames(1, 640, 480))), 2)
+
+    def test_choice_and_score_include_images(self):
+        for question_type, body in (("choice", choice_body("a", 0.8, {})), ("score", score_body(1.0, {"0": "x", "1": "y"}))):
+            _, post = run_with(body, question_type=question_type, criteria="a\nb", image_1=frames(1, 640, 480))
+            self.assertEqual(len(post.call_args.kwargs["json"]["state"]), 2)
 
 
 class CriteriaPayloadTests(unittest.TestCase):
