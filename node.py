@@ -1,3 +1,4 @@
+import asyncio
 import requests
 import json
 import time
@@ -157,7 +158,10 @@ class OpenRouterNode:
             return "API Key not provided."
         return shared.fetch_credits(api_key, timeout)
 
-    def generate_response(self, api_key, system_prompt, user_message_box, model,
+    async def generate_response(self, *args, **kwargs):
+        return await asyncio.to_thread(self._generate_response, *args, **kwargs)
+
+    def _generate_response(self, api_key, system_prompt, user_message_box, model,
                          web_search, cheapest, fastest, temperature, pdf_engine, chat_mode,
                          request_timeout=120, aspect_ratio="auto", image_resolution="1K", seed=0,
                          pdf_data=None, user_message_input=None, reasoning_effort="auto", **kwargs):

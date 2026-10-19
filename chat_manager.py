@@ -5,6 +5,9 @@ import re
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import time
+import threading
+
+session_lock = threading.Lock()
 
 class ChatSessionManager:
     """
@@ -127,9 +130,12 @@ class ChatSessionManager:
         Returns:
             Tuple of (session_path, message_history)
         """
-        # Try to find an active session
+        with session_lock:
+            return self._get_or_create_session(user_message, system_prompt)
+
+    def _get_or_create_session(self, user_message: str, system_prompt: str) -> Tuple[Path, List[Dict]]:
         active_session = self._find_active_session()
-        
+
         if active_session:
             self.current_session_path = active_session
             messages = self.load_conversation(active_session)
@@ -187,6 +193,10 @@ class ChatSessionManager:
             session_path: Path to the session directory
             messages: List of messages to save
         """
+        with session_lock:
+            self._save_conversation(session_path, messages)
+
+    def _save_conversation(self, session_path: Path, messages: List[Dict]):
         conversation_file = session_path / "conversation.json"
         
         # Load existing data to preserve metadata

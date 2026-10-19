@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import sys
 import types
@@ -91,7 +92,7 @@ class RequestTimeoutTests(unittest.TestCase):
         self.node.count_tokens = Mock(return_value=1)
 
     def call_generate_response(self, request_timeout=120, reasoning_effort="auto"):
-        return self.node.generate_response(
+        return asyncio.run(self.node.generate_response(
             api_key="test-key",
             system_prompt="system",
             user_message_box="hello",
@@ -104,7 +105,7 @@ class RequestTimeoutTests(unittest.TestCase):
             chat_mode=False,
             request_timeout=request_timeout,
             reasoning_effort=reasoning_effort,
-        )
+        ))
 
     def test_main_openrouter_request_uses_configured_timeout(self):
         response = Mock()
