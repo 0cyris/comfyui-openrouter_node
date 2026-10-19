@@ -6,6 +6,7 @@ image and audio conversion helpers, token counting, and request utilities.
 All node classes import from this module to avoid duplicating logic.
 """
 
+import asyncio
 import requests
 import json
 import time
@@ -24,6 +25,7 @@ DEFAULT_REQUEST_TIMEOUT = 120
 MIN_REQUEST_TIMEOUT = 1
 MAX_REQUEST_TIMEOUT = 3600
 CACHE_DURATION = 3600  # seconds
+RETRY_STATUSES = (408, 429, 500, 502, 503, 504)
 
 REASONING_EFFORT_OPTIONS = ("auto", "none", "minimal", "low", "medium", "high", "xhigh")
 DEFAULT_REASONING_EFFORT = "auto"
@@ -933,3 +935,46 @@ class _FallbackVideoObject:
                 writer.write(bgr)
         finally:
             writer.release()
+
+
+async def post_with_retries(url, api_key, payload, timeout, retries, label):
+    for attempt in range(retries + 1):
+        try:
+            response = await asyncio.to_thread(
+                requests.post,
+                url,
+                headers=build_standard_headers(api_key),
+                json=payload,
+                timeout=timeout,
+            )
+        except (requests.Timeout, requests.ConnectionError) as e:
+            error, transient = e, True
+        else:
+            if response.status_code < 400:
+                return response.json()
+            metadata = {}
+            try:
+                body = response.json()["error"]
+                message = body["message"]
+                metadata = body.get("metadata") or {}
+            except (ValueError, KeyError, TypeError, AttributeError):
+                message = response.text[:200]
+            details = []
+            if isinstance(metadata, dict):
+                if metadata.get("provider_name"):
+                    details.append(f"provider: {metadata['provider_name']}")
+                if metadata.get("reasons"):
+                    reasons = metadata["reasons"]
+                    details.append(f"reasons: {', '.join(map(str, reasons)) if isinstance(reasons, list) else reasons}")
+                if metadata.get("raw"):
+                    details.append(f"raw: {str(metadata['raw'])[:300]}")
+                moderated = "reasons" in metadata or "flagged_input" in metadata
+            else:
+                moderated = False
+            error = RuntimeError(f"OpenRouter {label} error {response.status_code}: {message}"
+                                 + (f" ({'; '.join(details)})" if details else ""))
+            transient = response.status_code in RETRY_STATUSES or moderated or "moderation" in str(message).lower()
+        if not transient or attempt == retries:
+            raise error
+        print(f"[{label.replace(' ', '')}Node] Retrying ({attempt + 1}/{retries}) after: {error}")
+        await asyncio.sleep(2 * (attempt + 1))
