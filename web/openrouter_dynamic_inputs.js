@@ -66,6 +66,12 @@ app.registerExtension({
         nodeType.prototype.onConnectionsChange = function (slotType, slot_idx, event, link_info, node_slot) {
             const me = onConnectionsChange?.apply(this, arguments);
 
+            // Links are restored one at a time while a workflow loads; cleaning up now
+            // would delete image slots whose links haven't been reattached yet.
+            if (app.configuringGraph) {
+                return me;
+            }
+
             if (slotType === TypeSlot.Input) {
                 // Only process image inputs
                 if (node_slot && !node_slot.name.startsWith(PREFIX)) {
