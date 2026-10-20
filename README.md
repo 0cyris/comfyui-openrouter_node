@@ -101,6 +101,7 @@ To keep your API key secure, use one of the following methods:
 - **fastest**: Route to the fastest provider by appending `:nitro` to the model ID (disabled by default).
 - **temperature**: Controls the randomness of the model's output (0.0 to 2.0).
 - **reasoning_effort**: Controls OpenRouter's unified reasoning parameter. `auto` sends no override and lets OpenRouter/model defaults apply. `none` explicitly disables reasoning. `minimal`, `low`, `medium`, `high`, and `xhigh` request increasing reasoning effort where the selected model supports it.
+- **service_tier**: Requests an OpenRouter service tier for the chat completion. `auto` (default) sends nothing and uses the provider's default routing; `default`, `flex`, `priority` and `ultrafast` are sent as `service_tier`. `flex` is billed at standard pricing when the model has no flex endpoint, but returns an error when a flex endpoint is out of capacity (there is no fallback to standard). `priority` and `ultrafast` fall back to standard billing when unavailable. `ultrafast` is limited to select OpenAI models and requires `max_tokens` to be set. The tier that served the request is shown in Stats when the response reports one. See [OpenRouter service tiers](https://openrouter.ai/docs/guides/features/service-tiers).
 - **chat_mode**: Enable conversation mode to maintain context across messages (disabled by default).
 - **request_timeout**: Maximum time, in seconds, to wait for the main OpenRouter completion request before returning an error (default: 120).
 
