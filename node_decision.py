@@ -184,9 +184,9 @@ class OpenRouterDecisionNode:
 
     async def decide(self, api_key, model, question_type, instructions, criteria, true_guidance, false_guidance,
                      state_text, threshold, request_timeout, retries, stop_on_false=False, candidates=None, **kwargs):
-        api_key = shared.get_api_key(api_key)
+        api_key = shared.get_api_key()
         if not api_key:
-            raise RuntimeError("API key not provided: fill in api_key, set the LLM_KEY env var, or use openrouter_api_key.json")
+            raise RuntimeError("API key not provided. Set LLM_KEY env var or use openrouter_api_key.json")
         timeout = shared.validate_request_timeout(
             request_timeout, self.min_request_timeout, self.max_request_timeout, self.default_request_timeout)
         connected = [kwargs[k] for k in sorted((k for k in kwargs if k.startswith("image_")), key=lambda x: int(x.split("_")[1]))

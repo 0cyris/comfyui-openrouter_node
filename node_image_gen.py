@@ -102,7 +102,7 @@ class OpenRouterImageGenNode:
         placeholder_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
 
         # Resolve API key and prompt
-        api_key = shared.get_api_key(api_key)
+        api_key = shared.get_api_key()
         if not api_key:
             return (
                 placeholder_image,

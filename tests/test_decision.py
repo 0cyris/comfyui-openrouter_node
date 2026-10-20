@@ -3,6 +3,7 @@ import base64
 import importlib.util
 import io
 import json
+import os
 import sys
 import threading
 import types
@@ -83,6 +84,12 @@ def decode_part(part):
     image = Image.open(io.BytesIO(base64.b64decode(part["image_url"]["url"][len(prefix):])))
     assert image.format == "JPEG"
     return image.size
+
+
+def setUpModule():
+    patcher = patch.dict(os.environ, {"LLM_KEY": "test-key"})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 class PayloadTests(unittest.TestCase):

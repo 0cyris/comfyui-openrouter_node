@@ -29,14 +29,12 @@ def _register_routes():
             if not model:
                 return web.json_response({"error": "Model ID required"}, status=400)
 
-            # Get API key from header (optional - some models have public voice lists)
-            api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
-
-            # Fetch voices for the model
-            voices = shared.get_model_supported_voices(model, api_key if api_key else None)
+            voices = shared.get_model_supported_voices(model, shared.get_api_key())
 
             print(f"[OpenRouter] Voices endpoint called for model: {model}, found {len(voices)} voices")
             return web.json_response({"voices": voices})
+
+        PromptServer.instance.add_on_prompt_handler(lambda json_data: shared.blank_prompt_api_keys(json_data, NODE_CLASS_MAPPINGS))
 
     except ImportError as e:
         print(f"[OpenRouter] Warning: Could not register voice routes: {e}")

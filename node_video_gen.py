@@ -124,7 +124,7 @@ class OpenRouterVideoGenNode:
         )
 
         # Resolve API key and prompt
-        api_key = shared.get_api_key(api_key)
+        api_key = shared.get_api_key()
         if not api_key:
             return (
                 error_placeholder,

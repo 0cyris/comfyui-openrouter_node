@@ -2,6 +2,7 @@ import asyncio
 import base64
 import importlib.util
 import io
+import os
 import sys
 import types
 import unittest
@@ -59,6 +60,12 @@ def build(**overrides):
                 quality="auto", background="auto", seed=0, references=[])
     args.update(overrides)
     return Node.build_payload(**args)
+
+
+def setUpModule():
+    patcher = patch.dict(os.environ, {"LLM_KEY": "test-key"})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 class PayloadTests(unittest.TestCase):

@@ -32,6 +32,38 @@ const DYNAMIC_VOICE_NODE_IDS = new Set([
 const PREFIX = "image";
 const TYPE = "IMAGE";
 
+// The api_key widget is a hidden placeholder that keeps saved widgets_values aligned.
+// The key itself is read by the server from LLM_KEY or openrouter_api_key.json.
+app.registerExtension({
+    name: 'OpenRouter.HiddenApiKey',
+    async beforeRegisterNodeDef(nodeType, nodeData, app) {
+        if (!nodeData.name.startsWith("OpenRouter") || !nodeData.input?.required?.api_key) {
+            return
+        }
+
+        const onNodeCreated = nodeType.prototype.onNodeCreated;
+        nodeType.prototype.onNodeCreated = function () {
+            const me = onNodeCreated?.apply(this);
+            const apiKeyWidget = this.widgets.find(w => w.name === "api_key");
+            apiKeyWidget.hidden = true;
+            apiKeyWidget.serializeValue = () => "";
+            this.setSize([this.size[0], this.computeSize()[1]]);
+            return me;
+        }
+
+        const onConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function () {
+            const me = onConfigure?.apply(this, arguments);
+            const apiKeyWidget = this.widgets.find(w => w.name === "api_key");
+            if (apiKeyWidget.value) {
+                console.warn("[OpenRouter] Ignored the api_key saved in this workflow. Keys are read only from the LLM_KEY env var or openrouter_api_key.json.");
+                apiKeyWidget.value = "";
+            }
+            return me;
+        }
+    },
+})
+
 app.registerExtension({
     name: 'OpenRouter.DynamicImageInputs',
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
@@ -43,14 +75,6 @@ app.registerExtension({
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const me = onNodeCreated?.apply(this);
-
-            // api_key security label — only on the text LLM node
-            if (nodeData.name === "OpenRouterNode") {
-                const apiKeyWidget = this.widgets?.find(w => w.name === "api_key");
-                if (apiKeyWidget) {
-                    apiKeyWidget.label = "api_key (Leave blank for secure loading)";
-                }
-            }
 
             // Start with a new dynamic input slot
             this.addInput(PREFIX, TYPE);
@@ -192,16 +216,10 @@ app.registerExtension({
 
                     // Fetch voices for the selected model
                     try {
-                        const apiKeyWidget = this.widgets?.find(w => w.name === "api_key");
-                        const apiKey = apiKeyWidget?.value || "";
-
                         const url = "/openrouter/voices/" + encodeURIComponent(value);
                         console.log(`[SpeechNode] Fetching voices from: ${url}`);
 
-                        const response = await fetch(url, {
-                            method: "GET",
-                            headers: apiKey ? { "Authorization": `Bearer ${apiKey}` } : {},
-                        });
+                        const response = await fetch(url);
 
                         if (response.ok) {
                             const data = await response.json();
