@@ -14,6 +14,8 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parents[1]))  # ComfyUI root, for comfy.utils
 
+from comfy_execution.graph_utils import ExecutionBlocker  # noqa: E402
+
 
 def load_module():
     package_name = "comfy_openrouter_image_api_test"
@@ -160,6 +162,47 @@ class SplitTests(unittest.TestCase):
         self.assertEqual(sent[0]["n"], 4)
 
 
+class FailureTests(unittest.TestCase):
+    def setUp(self):
+        Node.failures.clear()
+
+    def failed_call(self, **kwargs):
+        response = make_response(status=400, body={"error": {"message": "bad prompt"}})
+        with patch.object(node_module.requests, "post", return_value=response):
+            return generate("key", "p", "m", retries=0, unique_id="7", **kwargs)
+
+    def test_failure_blocks_images_and_reports_in_stats(self):
+        images, stats, credits, cost = self.failed_call()
+        self.assertIsInstance(images, ExecutionBlocker)
+        self.assertIn("bad prompt", images.message)
+        self.assertTrue(stats.startswith("FAILED"))
+        self.assertEqual((credits, cost), ("", 0.0))
+
+    def test_failure_changes_is_changed_so_the_next_queue_retries(self):
+        before = Node.IS_CHANGED(unique_id="7")
+        self.failed_call()
+        self.assertNotEqual(Node.IS_CHANGED(unique_id="7"), before)
+        self.assertEqual(Node.IS_CHANGED(unique_id="8"), before)
+
+    def test_success_leaves_is_changed_alone(self):
+        before = Node.IS_CHANGED(unique_id="7")
+        body = {"data": [{"b64_json": png_b64(4, 4)}], "usage": {"cost": 0.01}}
+        with patch.object(node_module.requests, "post", return_value=make_response(body=body)), \
+                patch.object(shared, "fetch_credits", return_value=""):
+            generate("key", "p", "m", unique_id="7")
+        self.assertEqual(Node.IS_CHANGED(unique_id="7"), before)
+
+    def test_raise_mode_still_raises(self):
+        with self.assertRaisesRegex(RuntimeError, "bad prompt"):
+            self.failed_call(on_error="raise")
+        self.assertEqual(Node.failures, {})
+
+    def test_missing_api_key_still_raises(self):
+        with patch.object(shared, "get_api_key", return_value=""):
+            with self.assertRaisesRegex(RuntimeError, "API Key not provided"):
+                generate("", "p", "m")
+
+
 class ReferenceTests(unittest.TestCase):
     def test_batch_frames_are_sent_in_socket_order(self):
         single = torch.zeros((1, 8, 8, 3))
@@ -301,7 +344,7 @@ class HttpErrorTests(unittest.TestCase):
         response = make_response(status=status, body={"error": {"message": message}})
         with patch.object(node_module.requests, "post", return_value=response):
             with self.assertRaises(RuntimeError) as ctx:
-                generate("key", "p", "m")
+                generate("key", "p", "m", on_error="raise")
         return str(ctx.exception)
 
     def test_400_raises_with_api_message(self):
@@ -317,7 +360,7 @@ class HttpErrorTests(unittest.TestCase):
         response.json.side_effect = ValueError
         with patch.object(node_module.requests, "post", return_value=response):
             with self.assertRaisesRegex(RuntimeError, "Bad Gateway"):
-                generate("key", "p", "m")
+                generate("key", "p", "m", on_error="raise")
 
 
 class RetryTests(unittest.TestCase):
@@ -345,7 +388,7 @@ class RetryTests(unittest.TestCase):
         with patch.object(node_module.requests, "post", side_effect=responses) as post, \
                 patch.object(shared, "fetch_credits", return_value=""):
             try:
-                result = generate("key", "p", "m", **kwargs)
+                result = generate("key", "p", "m", on_error="raise", **kwargs)
             except RuntimeError as e:
                 result = e
         return result, post.call_count
@@ -355,6 +398,11 @@ class RetryTests(unittest.TestCase):
         (images, _, _, _), calls = self.run_posts([moderation, self.success()])
         self.assertEqual(images.shape[0], 1)
         self.assertEqual(calls, 2)
+
+    def test_openai_safety_system_400_then_success(self):
+        blocked = self.error(400, "Your request was rejected by the safety system. If you believe this is an error, contact us at help.openai.com.")
+        (images, _, _, _), calls = self.run_posts([blocked, self.success()])
+        self.assertEqual((images.shape[0], calls), (1, 2))
 
     def test_moderation_detected_from_metadata(self):
         flagged = self.error(400, "Provider returned error", {"flagged_input": "text"})

@@ -973,7 +973,8 @@ async def post_with_retries(url, api_key, payload, timeout, retries, label):
                 moderated = False
             error = RuntimeError(f"OpenRouter {label} error {response.status_code}: {message}"
                                  + (f" ({'; '.join(details)})" if details else ""))
-            transient = response.status_code in RETRY_STATUSES or moderated or "moderation" in str(message).lower()
+            blocked = str(message).lower()
+            transient = response.status_code in RETRY_STATUSES or moderated or "moderation" in blocked or "safety system" in blocked
         if not transient or attempt == retries:
             raise error
         print(f"[{label.replace(' ', '')}Node] Retrying ({attempt + 1}/{retries}) after: {error}")

@@ -18,6 +18,7 @@ import torch
 from PIL import Image
 
 import comfy.utils
+from comfy_execution.graph_utils import ExecutionBlocker
 
 from . import openrouter_shared as shared
 
@@ -39,6 +40,7 @@ class OpenRouterImageAPINode:
 
     models_cache = None
     model_params = {}
+    failures = {}
     endpoints_cache = {}
     last_fetch_time = 0
     cache_duration = shared.CACHE_DURATION
@@ -84,7 +86,9 @@ class OpenRouterImageAPINode:
                     "display": "number",
                 }),
                 "retries": ("INT", {"default": 1, "min": 0, "max": 5}),
+                "on_error": (["block", "raise"], {"default": "block", "tooltip": "block: a failed request blocks only what depends on this node, and the rest of the run finishes. raise: the whole run stops."}),
             },
+            "hidden": {"unique_id": "UNIQUE_ID"},
             "optional": {
                 "prompt_input": ("STRING", {"forceInput": True}),
                 # image_1..image_N are added dynamically by openrouter_dynamic_inputs.js
@@ -96,6 +100,11 @@ class OpenRouterImageAPINode:
 
     FUNCTION = "generate_images"
     CATEGORY = "LLM"
+
+    @classmethod
+    def IS_CHANGED(cls, unique_id=None, **kwargs):
+        """A blocked result is cached like any other; counting failures per node makes the next queue run it again."""
+        return cls.failures.get(unique_id, 0)
 
     @classmethod
     def fetch_openrouter_models(cls):
@@ -229,7 +238,7 @@ class OpenRouterImageAPINode:
 
     async def generate_images(self, api_key, prompt, model, n=1, aspect_ratio="auto", resolution="default",
                               quality="auto", background="auto", seed=0, request_timeout=120,
-                              retries=1, prompt_input=None, **kwargs):
+                              retries=1, on_error="block", unique_id=None, prompt_input=None, **kwargs):
         api_key = shared.get_api_key(api_key)
         if not api_key:
             raise RuntimeError("API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json")
@@ -277,10 +286,16 @@ class OpenRouterImageAPINode:
 
         # Async + worker threads let these calls and other independent image nodes run concurrently
         start_time = time.time()
-        results = await asyncio.gather(*(shared.post_with_retries(f"{shared.BASE_URL}/images", api_key, p, validated_timeout, retries, "Image API") for p in payloads))
-        elapsed = time.time() - start_time
-
-        images = self.decode_images([item for r in results for item in (r.get("data") or [])])
+        try:
+            results = await asyncio.gather(*(shared.post_with_retries(f"{shared.BASE_URL}/images", api_key, p, validated_timeout, retries, "Image API") for p in payloads))
+            elapsed = time.time() - start_time
+            images = self.decode_images([item for r in results for item in (r.get("data") or [])])
+        except (RuntimeError, requests.RequestException) as e:
+            if on_error == "raise":
+                raise
+            self.failures[unique_id] = self.failures.get(unique_id, 0) + 1
+            print(f"[ImageAPINode] Failed, blocking what depends on it: {e}")
+            return (ExecutionBlocker(f"{model}: {e}"), f"FAILED: {e}", "", 0.0)
         costs = [r.get("usage", {}).get("cost") for r in results]
         cost = sum(c for c in costs if c is not None) if any(c is not None for c in costs) else None
         print(f"[ImageAPINode] Response: {images.shape[0]} image(s), cost={cost}")
