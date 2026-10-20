@@ -279,6 +279,18 @@ class CandidateTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "OpenRouter Decision error 400: bad image"):
                 decide(candidates=candidates(3))
 
+    def test_stop_on_false_raises_for_a_failed_best_candidate(self):
+        with self.assertRaisesRegex(RuntimeError, r"Decision check failed: answer false, value 0\.30 is below threshold 0\.50"):
+            self.run_batch([0.1, 0.3], stop_on_false=True)
+
+    def test_stop_on_false_passes_when_best_candidate_passes(self):
+        outputs, _, _ = self.run_batch([0.1, 0.8], stop_on_false=True)
+        self.assertEqual((outputs[2], outputs[5]), (True, 1))
+
+    def test_failed_candidate_does_not_raise_by_default(self):
+        outputs, _, _ = self.run_batch([0.1, 0.3])
+        self.assertEqual(outputs[2], False)
+
     def test_no_candidates_is_a_single_request(self):
         outputs, post = run_with(answer_body(0.8, usage={"cost": 0.00002}))
         self.assertEqual(post.call_count, 1)

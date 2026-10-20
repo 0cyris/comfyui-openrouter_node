@@ -65,7 +65,8 @@ class OpenRouterDecisionNode:
       5) "cost"      : usage.cost summed over all requests (0.0 if not reported)
       6) "best_index": index of that candidate (0 without candidates)
       7) "best_image": that candidate's original frame (a black 64x64 placeholder without candidates)
-    Errors raise RuntimeError so ComfyUI shows them and caches nothing.
+    Errors raise RuntimeError so ComfyUI shows them and caches nothing. With stop_on_false, a best candidate that is
+    not passed raises too.
     """
 
     models_cache = None
@@ -101,6 +102,7 @@ class OpenRouterDecisionNode:
                     "display": "number",
                 }),
                 "retries": ("INT", {"default": 1, "min": 0, "max": 5}),
+                "stop_on_false": ("BOOLEAN", {"default": False, "tooltip": "Stop the run with an error when the best candidate is not passed. Anything that waits for this node, e.g. a save fed from best_image, does not run."}),
             },
             "optional": {
                 "candidates": ("IMAGE", {"tooltip": "Each frame is judged in its own request; the best one is returned as best_index and best_image."}),
@@ -181,7 +183,7 @@ class OpenRouterDecisionNode:
         return (text, value, value >= threshold, answer, cost)
 
     async def decide(self, api_key, model, question_type, instructions, criteria, true_guidance, false_guidance,
-                     state_text, threshold, request_timeout, retries, candidates=None, **kwargs):
+                     state_text, threshold, request_timeout, retries, stop_on_false=False, candidates=None, **kwargs):
         api_key = shared.get_api_key(api_key)
         if not api_key:
             raise RuntimeError("API key not provided: fill in api_key, set the LLM_KEY env var, or use openrouter_api_key.json")
@@ -203,6 +205,8 @@ class OpenRouterDecisionNode:
         parsed = [self.parse_answer(result, payload, threshold) for result, payload in zip(results, payloads)]
         best = max(range(len(parsed)), key=lambda i: parsed[i][1])
         text, value, passed, _, _ = parsed[best]
+        if stop_on_false and not passed:
+            raise RuntimeError(f"Decision check failed: answer {text}, value {value:.2f} is below threshold {threshold:.2f}")
         if candidates is None:
             details, best_image = parsed[0][3], torch.zeros((1, 64, 64, 3), dtype=torch.float32)
         else:
