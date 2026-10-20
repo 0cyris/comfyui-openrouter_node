@@ -671,34 +671,6 @@ def decode_audio_bytes(audio_bytes, fmt):
 
 # ── Video handling ───────────────────────────────────────────────────────────
 
-def download_file(url, timeout=None, headers=None):
-    """
-    Downloads a file from a URL and returns the raw bytes.
-
-    Args:
-        url: The URL to download from.
-        timeout: Optional request timeout in seconds.
-        headers: Optional dict of HTTP headers (e.g. for Authorization).
-
-    Returns: bytes or None on failure.
-    """
-    try:
-        validated_timeout = validate_request_timeout(
-            timeout if timeout is not None else DEFAULT_REQUEST_TIMEOUT
-        )
-        response = requests.get(
-            url,
-            timeout=validated_timeout,
-            stream=True,
-            headers=headers or {},
-        )
-        response.raise_for_status()
-        return response.content
-    except Exception as e:
-        print(f"[openrouter_shared] Error downloading file: {e}")
-        return None
-
-
 def video_bytes_to_frames(video_bytes, extract_fps=True):
     """
     Converts raw video bytes to a frame tensor and metadata.
@@ -708,7 +680,7 @@ def video_bytes_to_frames(video_bytes, extract_fps=True):
         metadata: dict with fps, frame_count, duration, width, height
     )
 
-    On failure, returns (placeholder_tensor, empty_metadata).
+    Raises RuntimeError if the video cannot be decoded.
     """
     try:
         import cv2
@@ -777,18 +749,9 @@ def video_bytes_to_frames(video_bytes, extract_fps=True):
             os.unlink(tmp_path)
 
     except ImportError as e:
-        print(f"[openrouter_shared] OpenCV (cv2) is required for video processing. Install it with: pip install opencv-python. Error: {e}")
-        return _placeholder_video_tensor(), {}
+        raise RuntimeError(f"OpenCV (cv2) is required to read videos. Install it with: pip install opencv-python ({e})") from e
     except Exception as e:
-        import traceback
-        print(f"[openrouter_shared] Error converting video bytes to frames: {e}")
-        print(f"[openrouter_shared] Traceback: {traceback.format_exc()}")
-        return _placeholder_video_tensor(), {}
-
-
-def _placeholder_video_tensor():
-    """Returns a single black frame as placeholder."""
-    return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+        raise RuntimeError(f"Could not decode the video: {e}") from e
 
 
 def _import_comfy_video_classes():

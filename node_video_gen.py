@@ -6,11 +6,12 @@ Accepts a text prompt and optional parameters; outputs a VIDEO object.
 Handles async polling until the video is generated.
 """
 
+import re
 import requests
-import json
 import time
 import hashlib
 import torch
+import comfy.model_management
 from . import openrouter_shared as shared
 
 
@@ -94,6 +95,11 @@ class OpenRouterVideoGenNode:
                 "first_frame": ("IMAGE", {"forceInput": True}),
                 "last_frame": ("IMAGE", {"forceInput": True}),
                 # reference_1, reference_2, etc. are added dynamically by openrouter_dynamic_inputs.js
+                "video_job_id": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "tooltip": "Resume a job that was already submitted: polls and downloads it without submitting again. The prompt and media inputs are ignored.",
+                }),
             }
         }
 
@@ -108,46 +114,12 @@ class OpenRouterVideoGenNode:
         """Fetches video-output model IDs via GET /api/v1/models?output_modalities=video."""
         return shared.fetch_filtered_models(cls, "video", cls._fallback_models, "[VideoGenNode]")
 
-    def generate_video(self, api_key, prompt, model,
-                       web_search=False, cheapest=False, fastest=False,
-                       aspect_ratio="auto", duration=6, resolution="720p",
-                       seed=0, generate_audio=False, request_timeout=120,
-                       poll_interval=5, prompt_input=None, first_frame=None,
-                       last_frame=None, **kwargs):
-        """
-        Submits a video generation request to OpenRouter and polls for completion.
-
-        Returns (video_object, stats_str, credits_str).
-        """
-        error_placeholder = shared.build_video_object(
-            shared._placeholder_video_tensor(), fps=24.0
-        )
-
-        # Resolve API key and prompt
-        api_key = shared.get_api_key(api_key)
-        if not api_key:
-            return (
-                error_placeholder,
-                "Stats N/A",
-                "Error: API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json",
-            )
-
-        effective_prompt = (
-            prompt_input if prompt_input is not None and prompt_input.strip()
-            else prompt
-        )
-
-        validated_timeout = shared.validate_request_timeout(
-            request_timeout, self.min_request_timeout,
-            self.max_request_timeout, self.default_request_timeout
-        )
-        modified_model = shared.apply_model_modifiers(model, web_search, cheapest, fastest)
-        headers = shared.build_standard_headers(api_key)
-
-        # Build request data
+    @staticmethod
+    def build_payload(model, prompt, duration, seed, generate_audio, resolution,
+                      aspect_ratio, first_frame, last_frame, references):
         data = {
-            "model": modified_model,
-            "prompt": effective_prompt,
+            "model": model,
+            "prompt": prompt,
         }
 
         # Add optional parameters
@@ -163,7 +135,6 @@ class OpenRouterVideoGenNode:
         # Handle aspect ratio if specified
         if aspect_ratio != "auto":
             # Try to extract aspect ratio string
-            import re
             match = re.search(r'(\d+):(\d+)', aspect_ratio)
             if match:
                 data["aspect_ratio"] = f"{match.group(1)}:{match.group(2)}"
@@ -171,26 +142,20 @@ class OpenRouterVideoGenNode:
         # Handle frame images (first/last frame for video generation)
         frame_images = []
         if first_frame is not None:
-            try:
-                frame_b64 = shared.image_to_base64(first_frame)
-                frame_images.append({
-                    "type": "first_frame",
-                    "url": f"data:image/png;base64,{frame_b64}"
-                })
-                print("[VideoGenNode] Added first_frame for video generation")
-            except Exception as e:
-                print(f"[VideoGenNode] Warning: Failed to process first_frame: {e}")
+            frame_b64 = shared.image_to_base64(first_frame)
+            frame_images.append({
+                "type": "first_frame",
+                "url": f"data:image/png;base64,{frame_b64}"
+            })
+            print("[VideoGenNode] Added first_frame for video generation")
 
         if last_frame is not None:
-            try:
-                frame_b64 = shared.image_to_base64(last_frame)
-                frame_images.append({
-                    "type": "last_frame",
-                    "url": f"data:image/png;base64,{frame_b64}"
-                })
-                print("[VideoGenNode] Added last_frame for video generation")
-            except Exception as e:
-                print(f"[VideoGenNode] Warning: Failed to process last_frame: {e}")
+            frame_b64 = shared.image_to_base64(last_frame)
+            frame_images.append({
+                "type": "last_frame",
+                "url": f"data:image/png;base64,{frame_b64}"
+            })
+            print("[VideoGenNode] Added last_frame for video generation")
 
         if frame_images:
             data["frame_images"] = frame_images
@@ -198,131 +163,143 @@ class OpenRouterVideoGenNode:
         # Handle reference images (for guidance/conditioning)
         input_references = []
         ref_keys = sorted(
-            [k for k in kwargs if k.startswith("reference_")],
+            [k for k in references if k.startswith("reference_")],
             key=lambda x: int(x.split("_")[1]) if "_" in x and x.split("_")[1].isdigit() else 0
         )
         for key in ref_keys:
-            if kwargs[key] is not None:
-                try:
-                    ref_b64 = shared.image_to_base64(kwargs[key])
-                    input_references.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{ref_b64}"}
-                    })
-                    print(f"[VideoGenNode] Added reference image from {key}")
-                except Exception as e:
-                    print(f"[VideoGenNode] Warning: Failed to process {key}: {e}")
+            if references[key] is not None:
+                ref_b64 = shared.image_to_base64(references[key])
+                input_references.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{ref_b64}"}
+                })
+                print(f"[VideoGenNode] Added reference image from {key}")
 
         if input_references:
             data["input_references"] = input_references
+        return data
 
-        url = f"{shared.BASE_URL}/videos"
-
+    @staticmethod
+    def check(response, action):
+        """Raises with OpenRouter's own message and provider detail when a request failed."""
+        if response.status_code < 400:
+            return
         try:
-            # Submit video generation request
-            print(f"[VideoGenNode] Submitting video generation request for model: {modified_model}")
-            start_time = time.time()
-            response = requests.post(url, headers=headers, json=data, timeout=validated_timeout)
-            response.raise_for_status()
+            error = response.json()["error"]
+            message = error["message"]
+            metadata = error.get("metadata") or {}
+        except (ValueError, KeyError, TypeError, AttributeError):
+            message, metadata = response.text[:200], {}
+        details = [f"{key}: {str(metadata[key])[:300]}" for key in ("provider_name", "reasons", "raw")
+                   if isinstance(metadata, dict) and metadata.get(key)]
+        raise RuntimeError(f"OpenRouter video {action} error {response.status_code}: {message}"
+                           + (f" ({'; '.join(details)})" if details else ""))
 
+    @staticmethod
+    def wait(seconds):
+        for _ in range(seconds):
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            time.sleep(1)
+
+    def poll(self, job_id, headers, timeout, poll_interval):
+        """Returns the job's status data once it has completed."""
+        start_time = time.time()
+        for poll_count in range(1, max(1, timeout // poll_interval) + 1):
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            response = requests.get(f"{shared.BASE_URL}/videos/{job_id}", headers=headers, timeout=timeout)
+            self.check(response, "status")
+            status_data = response.json()
+            status = status_data.get("status")
+            print(f"[VideoGenNode] Poll #{poll_count} - Status: {status}")
+
+            if status == "completed":
+                return status_data
+            if status in ["failed", "cancelled", "expired"]:
+                raise RuntimeError(f"Video generation {status}: {status_data.get('error', status)}")
+            self.wait(poll_interval)
+        raise RuntimeError(f"Video generation timed out after {time.time() - start_time:.1f}s")
+
+    def generate_video(self, api_key, prompt, model,
+                       web_search=False, cheapest=False, fastest=False,
+                       aspect_ratio="auto", duration=6, resolution="720p",
+                       seed=0, generate_audio=False, request_timeout=120,
+                       poll_interval=5, prompt_input=None, first_frame=None,
+                       last_frame=None, video_job_id="", **kwargs):
+        """
+        Submits a video generation request to OpenRouter and polls for completion.
+        With video_job_id set, resumes that job instead of submitting a new one.
+
+        Returns (video_object, stats_str, credits_str).
+        """
+        api_key = shared.get_api_key(api_key)
+        if not api_key:
+            raise RuntimeError("API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json")
+
+        effective_prompt = (
+            prompt_input if prompt_input is not None and prompt_input.strip()
+            else prompt
+        )
+
+        validated_timeout = shared.validate_request_timeout(
+            request_timeout, self.min_request_timeout,
+            self.max_request_timeout, self.default_request_timeout
+        )
+        modified_model = shared.apply_model_modifiers(model, web_search, cheapest, fastest)
+        headers = shared.build_standard_headers(api_key)
+
+        start_time = time.time()
+        job_id = video_job_id.strip()
+        if job_id:
+            print(f"[VideoGenNode] Resuming video job: {job_id}")
+        else:
+            data = self.build_payload(modified_model, effective_prompt, duration, seed, generate_audio,
+                                      resolution, aspect_ratio, first_frame, last_frame, kwargs)
+            print(f"[VideoGenNode] Submitting video generation request for model: {modified_model}")
+            response = requests.post(f"{shared.BASE_URL}/videos", headers=headers, json=data, timeout=validated_timeout)
+            self.check(response, "submit")
             result = response.json()
             job_id = result.get("id")
             if not job_id:
-                raise ValueError("No job ID returned from API")
-
+                raise RuntimeError("OpenRouter returned no job ID for the video request")
             print(f"[VideoGenNode] Received job ID: {job_id}, status: {result.get('status')}")
 
-            # Poll for completion
-            video_url = None
-            poll_count = 0
-            max_polls = max(1, validated_timeout // poll_interval)
+        try:
+            status_data = self.poll(job_id, headers, validated_timeout, poll_interval)
+            content_urls = status_data.get("unsigned_urls")
+            if not content_urls:
+                raise RuntimeError("Video generation completed but returned no video URL")
 
-            while poll_count < max_polls:
-                poll_count += 1
-                time.sleep(poll_interval)
-
-                status_url = f"{shared.BASE_URL}/videos/{job_id}"
-                status_response = requests.get(status_url, headers=headers, timeout=validated_timeout)
-                status_response.raise_for_status()
-                status_data = status_response.json()
-                status = status_data.get("status")
-
-                print(f"[VideoGenNode] Poll #{poll_count} - Status: {status}")
-
-                if status == "completed":
-                    # Get video content URL
-                    content_urls = status_data.get("unsigned_urls", [])
-                    if content_urls:
-                        video_url = content_urls[0]
-                        print(f"[VideoGenNode] Video generated successfully: {video_url[:100]}...")
-                    break
-                elif status in ["failed", "cancelled", "expired"]:
-                    error_msg = status_data.get("error", status)
-                    raise ValueError(f"Video generation {status}: {error_msg}")
-
-            end_time = time.time()
-            elapsed = end_time - start_time
-
-            if not video_url:
-                raise ValueError(f"Video generation timed out after {elapsed:.1f}s")
-
-            # Download video bytes (authenticated — OpenRouter content endpoint requires bearer token)
-            print(f"[VideoGenNode] Downloading video from: {video_url[:100]}...")
-            video_bytes = shared.download_file(
-                video_url, validated_timeout, headers=headers
-            )
-            if not video_bytes:
-                raise ValueError("Failed to download generated video")
-
-            print(f"[VideoGenNode] Downloaded {len(video_bytes)} bytes")
-
-            # Convert video bytes to frame tensor
-            print("[VideoGenNode] Converting video to frame tensor...")
-            frames_tensor, video_metadata = shared.video_bytes_to_frames(video_bytes)
-
-            if frames_tensor.shape[0] <= 1 and frames_tensor.shape[1] == 64 and frames_tensor.shape[2] == 64:
-                print(f"[VideoGenNode] WARNING: Got placeholder tensor shape {frames_tensor.shape}, video extraction may have failed")
-            else:
-                print(f"[VideoGenNode] Successfully extracted frames: {frames_tensor.shape}")
-
-            # Build VIDEO object for ComfyUI
-            video_fps = video_metadata.get("fps", 24.0)
+            # OpenRouter content endpoint requires the bearer token
+            print(f"[VideoGenNode] Downloading video from: {content_urls[0][:100]}...")
+            response = requests.get(content_urls[0], headers=headers, timeout=validated_timeout)
+            self.check(response, "download")
+            frames_tensor, video_metadata = shared.video_bytes_to_frames(response.content)
+            video_fps = video_metadata["fps"]
             video_object = shared.build_video_object(
                 frames_tensor, fps=video_fps, audio=None, metadata=video_metadata
             )
-
-            # Stats
-            usage = status_data.get("usage", {})
-            cost_usd = usage.get("USD", 0.0)
-            frame_count = video_metadata.get("frame_count", 0)
-
-            stats = (
-                f"Job ID: {job_id}, "
-                f"Frames: {frame_count}, "
-                f"FPS: {video_fps:.1f}, "
-                f"Time: {elapsed:.1f}s, "
-                f"Cost: ${cost_usd:.3f}, "
-                f"Model: {modified_model}"
-            )
-
-            credits = shared.fetch_credits(api_key, validated_timeout)
-            return (video_object, stats, credits)
-
-        except requests.exceptions.RequestException as e:
-            error_msg = f"API Request Error: {str(e)}"
-            if hasattr(e, "response") and e.response is not None:
-                try:
-                    error_msg += f" | Details: {e.response.json()}"
-                except json.JSONDecodeError:
-                    error_msg += f" | Status: {e.response.status_code}"
-            else:
-                error_msg += " (Network or connection issue)"
-            print(f"[VideoGenNode] ERROR: {error_msg}")
-            return (error_placeholder, "Stats N/A due to error", error_msg)
+        except comfy.model_management.InterruptProcessingException:
+            print(f"[VideoGenNode] Interrupted. Set video_job_id to {job_id} to resume.")
+            raise
         except Exception as e:
-            error_msg = f"Node Error: {str(e)}"
-            print(f"[VideoGenNode] ERROR: {error_msg}")
-            return (error_placeholder, "Stats N/A due to error", error_msg)
+            raise RuntimeError(f"{e} | Video job: {job_id}. Set video_job_id to this ID to resume.") from e
+
+        elapsed = time.time() - start_time
+        usage = status_data.get("usage", {})
+        cost_usd = usage.get("USD", 0.0)
+        frame_count = video_metadata.get("frame_count", 0)
+
+        stats = (
+            f"Job ID: {job_id}, "
+            f"Frames: {frame_count}, "
+            f"FPS: {video_fps:.1f}, "
+            f"Time: {elapsed:.1f}s, "
+            f"Cost: ${cost_usd:.3f}, "
+            f"Model: {modified_model}"
+        )
+
+        credits = shared.fetch_credits(api_key, validated_timeout)
+        return (video_object, stats, credits)
 
     @classmethod
     def IS_CHANGED(cls, api_key, prompt, model,
@@ -330,7 +307,7 @@ class OpenRouterVideoGenNode:
                    aspect_ratio="auto", duration=6, resolution="720p",
                    seed=0, generate_audio=False, request_timeout=120,
                    poll_interval=5, prompt_input=None, first_frame=None,
-                   last_frame=None, **kwargs):
+                   last_frame=None, video_job_id="", **kwargs):
         """Check if any input that affects the output has changed."""
         import hashlib
 
@@ -371,7 +348,7 @@ class OpenRouterVideoGenNode:
         return (
             api_key, prompt, model, web_search, cheapest, fastest,
             aspect_ratio, duration, resolution, seed, generate_audio,
-            timeout_int, prompt_input, tuple(frame_hashes)
+            timeout_int, prompt_input, tuple(frame_hashes), video_job_id
         )
 
 
