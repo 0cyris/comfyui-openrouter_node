@@ -106,7 +106,12 @@ class OpenRouterVideoGenNode:
     @classmethod
     def fetch_openrouter_models(cls):
         """Fetches video-output model IDs via GET /api/v1/models?output_modalities=video."""
-        return shared.fetch_filtered_models(cls, "video", cls._fallback_models, "[VideoGenNode]")
+        return shared.fetch_filtered_models(cls, "video")
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, model):
+        # The model list loads in the background, so a saved model may not be in it yet
+        return True
 
     def generate_video(self, api_key, prompt, model,
                        web_search=False, cheapest=False, fastest=False,

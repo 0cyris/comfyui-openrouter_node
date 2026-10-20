@@ -100,7 +100,12 @@ class OpenRouterSpeechNode:
     @classmethod
     def fetch_openrouter_models(cls):
         """Fetches TTS model IDs via GET /api/v1/models?output_modalities=speech."""
-        return shared.fetch_filtered_models(cls, "speech", cls._fallback_models, "[SpeechNode]")
+        return shared.fetch_filtered_models(cls, "speech")
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, model):
+        # The model list loads in the background, so a saved model may not be in it yet
+        return True
 
     def _silent_audio(self):
         """Returns a silent 1-second mono audio placeholder."""

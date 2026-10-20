@@ -108,26 +108,25 @@ class OpenRouterImageAPINode:
 
     @classmethod
     def fetch_openrouter_models(cls):
-        """Fetches image model IDs and their supported_parameters via GET /api/v1/images/models."""
-        current_time = time.time()
-        if cls.models_cache is None or (current_time - cls.last_fetch_time > cls.cache_duration):
-            try:
-                api_key = shared.get_api_key("")
-                response = requests.get(
-                    f"{shared.BASE_URL}/images/models",
-                    headers=shared.build_standard_headers(api_key) if api_key else {},
-                    timeout=shared.DEFAULT_REQUEST_TIMEOUT,
-                )
-                response.raise_for_status()
-                data = response.json().get("data", [])
-                cls.model_params = {m["id"]: m.get("supported_parameters") or {} for m in data if m.get("id")}
-                cls.models_cache = sorted(cls.model_params) or cls._fallback_models[:]
-                cls.last_fetch_time = current_time
-            except Exception as e:
-                print(f"[ImageAPINode] Error fetching image models: {e}")
-                if cls.models_cache is None:
-                    cls.models_cache = cls._fallback_models[:]
-        return cls.models_cache
+        """Lists image model IDs and their supported_parameters via GET /api/v1/images/models; fetched in the background."""
+        def load():
+            api_key = shared.get_api_key("")
+            response = requests.get(
+                f"{shared.BASE_URL}/images/models",
+                headers=shared.build_standard_headers(api_key) if api_key else {},
+                timeout=shared.DEFAULT_REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json().get("data", [])
+            cls.model_params = {m["id"]: m.get("supported_parameters") or {} for m in data if m.get("id")}
+            cls.models_cache = sorted(cls.model_params) or cls._fallback_models[:]
+
+        return shared.cached_models(cls, load)
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, model):
+        # The model list loads in the background, so a saved model may not be in it yet
+        return True
 
     @classmethod
     def build_payload(cls, model, prompt, n, aspect_ratio, resolution, quality, background, seed, references):

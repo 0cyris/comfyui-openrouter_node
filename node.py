@@ -27,6 +27,10 @@ class OpenRouterNode:
     models_cache = None
     last_fetch_time = 0
     cache_duration = 3600  # Cache duration in seconds (1 hour)
+    _fallback_models = [
+        "error_fetching_models", "google/gemma-3-27b-it",
+        "openai/gpt-4o", "anthropic/claude-3.5-sonnet"
+    ]
     default_request_timeout = 120
     min_request_timeout = 1
     max_request_timeout = 3600
@@ -106,18 +110,16 @@ class OpenRouterNode:
 
     @classmethod
     def fetch_openrouter_models(cls):
-        """
-        Fetches text-output model IDs from the OpenRouter API, with caching.
-        Filters to only models that support text output.
-        """
-        raw, was_refreshed = shared.fetch_all_models_raw()
-        if cls.models_cache is None or was_refreshed:
-            filtered = shared.filter_models_by_output(raw, "text")
-            cls.models_cache = filtered if filtered else [
-                "error_fetching_models", "google/gemma-3-27b-it",
-                "openai/gpt-4o", "anthropic/claude-3.5-sonnet"
-            ]
-        return cls.models_cache
+        """Lists text-output model IDs from the OpenRouter API; fetched in the background."""
+        def load():
+            cls.models_cache = shared.filter_models_by_output(shared.fetch_all_models_raw(), "text") or cls._fallback_models[:]
+
+        return shared.cached_models(cls, load)
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, model):
+        # The model list loads in the background, so a saved model may not be in it yet
+        return True
 
     def validate_temperature(self, temperature):
         """

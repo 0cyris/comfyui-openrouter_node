@@ -5,6 +5,7 @@ import io
 import json
 import sys
 import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -448,21 +449,39 @@ class ModelListTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
+    def wait_for_refresh(self):
+        deadline = time.time() + 5
+        while shared._refresh_running and time.time() < deadline:
+            time.sleep(0.005)
+        self.assertFalse(shared._refresh_running)
+
     def test_lists_decision_models_with_input_modalities(self):
         body = {"data": [
             {"id": "b/decider", "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["decisions"]}},
             {"id": "a/decider-text", "architecture": {"input_modalities": ["text"], "output_modalities": ["decisions"]}},
         ]}
-        with patch.object(node_module.requests, "get", return_value=make_response(body=body)) as get:
-            models = Node.fetch_openrouter_models()
-        self.assertEqual(models, ["a/decider-text", "b/decider"])
+        release = threading.Event()
+
+        def gated_get(*args, **kwargs):
+            release.wait(5)
+            return make_response(body=body)
+
+        with patch.object(node_module.requests, "get", side_effect=gated_get) as get:
+            self.assertEqual(Node.fetch_openrouter_models(), Node._fallback_models)
+            release.set()
+            self.wait_for_refresh()
+            self.assertEqual(Node.fetch_openrouter_models(), ["a/decider-text", "b/decider"])
+        self.assertEqual(get.call_count, 1)
         self.assertEqual(get.call_args.args[0], "https://openrouter.ai/api/v1/models")
         self.assertEqual(get.call_args.kwargs["params"], {"output_modalities": "decisions"})
         self.assertEqual(Node.model_input_modalities, {"b/decider": ["text", "image"], "a/decider-text": ["text"]})
 
     def test_fetch_failure_uses_fallback(self):
         with patch.object(node_module.requests, "get", side_effect=OSError("down")):
+            Node.fetch_openrouter_models()
+            self.wait_for_refresh()
             self.assertEqual(Node.fetch_openrouter_models(), Node._fallback_models)
+            self.wait_for_refresh()
 
 
 class ErrorTests(unittest.TestCase):

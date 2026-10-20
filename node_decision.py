@@ -10,7 +10,6 @@ import base64
 import io
 import json
 import math
-import time
 from urllib.parse import urlsplit
 
 import requests
@@ -118,25 +117,24 @@ class OpenRouterDecisionNode:
 
     @classmethod
     def fetch_openrouter_models(cls):
-        """Fetches decision model IDs and their input modalities via GET /api/v1/models?output_modalities=decisions."""
-        current_time = time.time()
-        if cls.models_cache is None or (current_time - cls.last_fetch_time > cls.cache_duration):
-            try:
-                response = requests.get(
-                    f"{shared.BASE_URL}/models",
-                    params={"output_modalities": "decisions"},
-                    timeout=shared.DEFAULT_REQUEST_TIMEOUT,
-                )
-                response.raise_for_status()
-                data = response.json().get("data", [])
-                cls.model_input_modalities = {m["id"]: m.get("architecture", {}).get("input_modalities", []) for m in data if m.get("id")}
-                cls.models_cache = sorted(cls.model_input_modalities) or cls._fallback_models[:]
-                cls.last_fetch_time = current_time
-            except Exception as e:
-                print(f"[DecisionNode] Error fetching decision models: {e}")
-                if cls.models_cache is None:
-                    cls.models_cache = cls._fallback_models[:]
-        return cls.models_cache
+        """Lists decision model IDs and their input modalities via GET /api/v1/models?output_modalities=decisions; fetched in the background."""
+        def load():
+            response = requests.get(
+                f"{shared.BASE_URL}/models",
+                params={"output_modalities": "decisions"},
+                timeout=shared.DEFAULT_REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json().get("data", [])
+            cls.model_input_modalities = {m["id"]: m.get("architecture", {}).get("input_modalities", []) for m in data if m.get("id")}
+            cls.models_cache = sorted(cls.model_input_modalities) or cls._fallback_models[:]
+
+        return shared.cached_models(cls, load)
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, model):
+        # The model list loads in the background, so a saved model may not be in it yet
+        return True
 
     @staticmethod
     def build_payload(model, question_type, instructions, criteria, true_guidance, false_guidance, state_text, images):
