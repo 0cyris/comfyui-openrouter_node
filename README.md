@@ -120,6 +120,7 @@ To keep your API key secure, use one of the following methods:
 - **image**: An image tensor if the response contains a generated image, otherwise returns an empty tensor.
 - **Stats**: A string detailing tokens per second, input tokens, output tokens, temperature, and the model used.
 - **Credits**: A string showing your remaining OpenRouter account balance (e.g., "Remaining: $9.792").
+- **cost**: The request's cost in USD as a float (`usage.cost` from the response, 0.0 if none is reported). Also shown in Stats.
 
 Note: To display the output text in ComfyUI, you can use the ShowText nodes from [ComfyUI-Custom-Scripts](https://github.com/pythongosssss/ComfyUI-Custom-Scripts), but any text display node will work.
 

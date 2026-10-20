@@ -31,11 +31,14 @@ node_module = load_module()
 Node = node_module.OpenRouterNode
 
 
-def make_response(text="done"):
+def make_response(text="done", cost=None):
     response = Mock()
+    usage = {"prompt_tokens": 2, "completion_tokens": 3}
+    if cost is not None:
+        usage["cost"] = cost
     response.json.return_value = {
         "choices": [{"message": {"content": text}}],
-        "usage": {"prompt_tokens": 2, "completion_tokens": 3},
+        "usage": usage,
     }
     return response
 
@@ -61,11 +64,50 @@ class ChatAsyncTests(unittest.TestCase):
         with patch.object(node_module.requests, "post", return_value=make_response("hi")):
             result = asyncio.run(respond(make_node()))
 
-        self.assertEqual(len(result), 4)
+        self.assertEqual(len(result), 5)
         self.assertEqual(result[0], "hi")
         self.assertEqual(tuple(result[1].shape), (1, 1, 1, 3))
         self.assertIn("3", result[2])
         self.assertEqual(result[3], "Remaining: $1.000")
+
+    def test_cost_output_is_last(self):
+        self.assertEqual(Node.RETURN_TYPES[-1], "FLOAT")
+        self.assertEqual(Node.RETURN_NAMES, ("Output", "image", "Stats", "Credits", "cost"))
+
+    def test_cost_comes_from_usage(self):
+        with patch.object(node_module.requests, "post", return_value=make_response(cost=0.00123)):
+            result = asyncio.run(respond(make_node()))
+
+        self.assertEqual(result[4], 0.00123)
+        self.assertIn("Cost: 0.00123", result[2])
+
+    def test_cost_is_zero_when_usage_has_none(self):
+        with patch.object(node_module.requests, "post", return_value=make_response()):
+            result = asyncio.run(respond(make_node()))
+
+        self.assertEqual(result[4], 0.0)
+        self.assertIn("Cost: 0.0", result[2])
+
+    def test_error_return_has_zero_cost(self):
+        with patch.object(node_module.requests, "post", side_effect=node_module.requests.exceptions.Timeout("request timed out")):
+            result = asyncio.run(respond(make_node()))
+
+        self.assertEqual(len(result), 5)
+        self.assertEqual(result[4], 0.0)
+
+    def test_chat_mode_keeps_working_with_cost(self):
+        node = make_node()
+        node.chat_manager = Mock()
+        node.chat_manager.get_or_create_session.return_value = ("session", [{"role": "system", "content": "system"}])
+        with patch.object(node_module.requests, "post", return_value=make_response("hi", cost=0.5)):
+            result = asyncio.run(node.generate_response(
+                api_key="test-key", system_prompt="system", user_message_box="hello", model="openai/gpt-4o",
+                web_search=False, cheapest=False, fastest=False, temperature=1.0, pdf_engine="auto",
+                chat_mode=True))
+
+        self.assertEqual(result[0], "hi")
+        self.assertEqual(result[4], 0.5)
+        node.chat_manager.save_conversation.assert_called_once()
 
     def test_calls_run_concurrently(self):
         def slow_post(*args, **kwargs):
