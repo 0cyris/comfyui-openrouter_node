@@ -47,6 +47,7 @@ app.registerExtension({
             const apiKeyWidget = this.widgets.find(w => w.name === "api_key");
             apiKeyWidget.hidden = true;
             apiKeyWidget.serializeValue = () => "";
+            apiKeyWidget.callback = () => { apiKeyWidget.value = "" };
             this.setSize([this.size[0], this.computeSize()[1]]);
             return me;
         }
@@ -55,6 +56,7 @@ app.registerExtension({
         nodeType.prototype.onConfigure = function () {
             const me = onConfigure?.apply(this, arguments);
             const apiKeyWidget = this.widgets.find(w => w.name === "api_key");
+            this.disconnectInput("api_key");
             if (apiKeyWidget.value) {
                 console.warn("[OpenRouter] Ignored the api_key saved in this workflow. Keys are read only from the LLM_KEY env var or openrouter_api_key.json.");
                 apiKeyWidget.value = "";
