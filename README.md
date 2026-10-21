@@ -98,6 +98,7 @@ The nodes have no API key field, so your key never ends up in a workflow or in t
 - **service_tier**: Requests an OpenRouter service tier for the chat completion. `auto` (default) sends nothing and uses the provider's default routing; `default`, `flex`, `priority` and `ultrafast` are sent as `service_tier`. With `cheapest` on (the default), the model gets `:floor`, which makes flex endpoints eligible (`:nitro` does the same for priority), so `auto` can be served by flex; `default` keeps the request on standard. `flex` is billed at standard pricing when the model has no flex endpoint, but can fail with a flex capacity error; it never falls back to a pricier endpoint. `ultrafast` is only on select OpenAI models and behaves like `priority` elsewhere. This node does not send `max_tokens`, so OpenRouter may fall back to priority when your balance does not cover the model's full output limit at ultrafast rates. Fallbacks are billed at the tier that served the request, which Stats shows. See [OpenRouter service tiers](https://openrouter.ai/docs/guides/features/service-tiers).
 - **chat_mode**: Enable conversation mode to maintain context across messages (disabled by default).
 - **request_timeout**: Maximum time, in seconds, to wait for the main OpenRouter completion request before returning an error (default: 120).
+- **on_error**: What a failed request does (default `block`). `block`: `Output` and `image` are blocked, so only the nodes that depend on them are skipped, and the rest of the run finishes and stays cached. Stats shows `FAILED: <error>`, Credits is empty and cost is 0.0. The node runs again on the next queue. `raise`: the error stops the whole run. This replaces the old behavior of returning the error text as `Output`, so workflows that displayed errors there now see them in Stats and the console. In chat mode a failed turn is not saved.
 
 > [!NOTE]
 > OpenRouter normalizes reasoning across providers, but behavior still depends on the selected model. Some providers map effort levels to token budgets, Gemini 3 maps effort to Google's thinking levels, `xhigh` may be mapped down when unsupported, and some reasoning models do not return visible reasoning tokens.
@@ -108,6 +109,7 @@ The nodes have no API key field, so your key never ends up in a workflow or in t
 - **pdf_data**: PDF document input for models that support document understanding.
 - **pdf_engine**: Choose between "auto", "mistral-ocr", or "pdf-text" for PDF processing.
 - **user_message_input**: Alternative input for the user message, useful for connecting to other nodes.
+- **json_schema** (optional, multiline): A JSON Schema object for structured output. Empty (default) is off. When set, the node sends it as OpenRouter's `response_format` (`json_schema`, strict) with `provider.require_parameters: true`, so only providers that honor structured outputs are used and `:floor`/`:nitro` still apply. The reply must parse as JSON, otherwise the request counts as a failure and follows `on_error`; `Output` is the raw JSON text. In strict mode every property must be listed in `required` and `additionalProperties` must be `false`. A schema that is not valid JSON fails before any request is sent. Models with no structured-output provider fail with OpenRouter's routing error. See [OpenRouter structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs).
 
 ### Outputs:
 
@@ -218,7 +220,7 @@ python manage_chats.py clean -d 30
 ## Troubleshooting
 
 - **Model list not loading**: Check your internet connection and OpenRouter API key.
-- **Error in response**: Check the error message in the output. It might be due to an invalid API key, model unavailability, or other API issues.
+- **Error in response**: Check the error message in Stats (`FAILED: ...`) or the console. It might be due to an invalid API key, model unavailability, or other API issues.
 - **Slow responses**: Try using the `:nitro` modifier by enabling the "fastest" option.
 - **Token counting issues**: The node uses tiktoken for accurate token counting, but falls back to an estimation method if there's an issue.
 

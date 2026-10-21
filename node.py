@@ -5,6 +5,7 @@ import time
 import base64
 import hashlib
 import torch
+from comfy_execution.graph_utils import ExecutionBlocker
 from . import openrouter_shared as shared
 from .chat_manager import ChatSessionManager
 
@@ -23,9 +24,12 @@ class OpenRouterNode:
       3) "Stats": a string detailing tokens per second, input tokens, and output tokens
       4) "Credits": a string showing your remaining OpenRouter account balance
       5) "cost": the request's cost in USD as a float (0.0 if the response reports none)
+    A failed request raises (on_error=raise) or, with on_error=block, blocks "Output" and
+    "image" and reports "FAILED: <error>" in Stats.
     """
 
     models_cache = None
+    failures = {}
     last_fetch_time = 0
     cache_duration = 3600  # Cache duration in seconds (1 hour)
     _fallback_models = [
@@ -87,10 +91,13 @@ class OpenRouterNode:
                     "display": "number",
                 }),
                 "service_tier": (["auto", "default", "flex", "priority", "ultrafast"], {"default": "auto"}),
+                "on_error": (["block", "raise"], {"default": "block", "tooltip": "block: a failed request blocks only what depends on this node, and the rest of the run finishes. raise: the whole run stops."}),
             },
+            "hidden": {"unique_id": "UNIQUE_ID"},
             "optional": {
                 "pdf_data": (PDF_DATA_TYPE,),  # Use '*' and check structure in generate_response
                 "user_message_input": ("STRING", {"forceInput": True}),
+                "json_schema": ("STRING", {"multiline": True, "default": "", "tooltip": "Optional JSON Schema object. When set, the reply must be JSON matching it (structured output). Empty: off."}),
             }
         }
 
@@ -151,10 +158,21 @@ class OpenRouterNode:
     async def generate_response(self, *args, **kwargs):
         return await asyncio.to_thread(self._generate_response, *args, **kwargs)
 
-    def _generate_response(self, api_key, system_prompt, user_message_box, model,
+    def _generate_response(self, on_error="block", unique_id=None, **kwargs):
+        try:
+            return self._request(**kwargs)
+        except Exception as e:
+            if on_error == "raise":
+                raise
+            self.failures[unique_id] = self.failures.get(unique_id, 0) + 1
+            print(f"[OpenRouterNode] Failed, blocking what depends on it: {e}")
+            blocker = ExecutionBlocker(f"{kwargs['model']}: {e}")
+            return (blocker, blocker, f"FAILED: {e}", "", 0.0)
+
+    def _request(self, api_key, system_prompt, user_message_box, model,
                          web_search, cheapest, fastest, temperature, pdf_engine, chat_mode,
                          request_timeout=120, aspect_ratio="auto", image_resolution="1K", seed=0,
-                         pdf_data=None, user_message_input=None, reasoning_effort="auto", service_tier="auto", **kwargs):
+                         pdf_data=None, user_message_input=None, reasoning_effort="auto", service_tier="auto", json_schema="", **kwargs):
         """
         Sends a completion request to the OpenRouter chat completion endpoint.
         Handles text, optional image, and optional PDF inputs.
@@ -173,7 +191,7 @@ class OpenRouterNode:
         api_key = shared.get_api_key()
 
         if not api_key:
-            return ("Error: API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json", placeholder_image, "Stats N/A", "Credits N/A", 0.0)
+            raise RuntimeError("API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json")
 
         url = f"{shared.BASE_URL}/chat/completions"
         headers = shared.build_standard_headers(api_key)
@@ -182,6 +200,13 @@ class OpenRouterNode:
         validated_temp = self.validate_temperature(temperature)
         validated_timeout = self.validate_request_timeout(request_timeout)
         validated_reasoning_effort = self.validate_reasoning_effort(reasoning_effort)
+
+        schema = None
+        if json_schema.strip():
+            try:
+                schema = json.loads(json_schema)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"json_schema is not valid JSON: {e}") from e
 
         # Decide whether to use user_message_input or user_message_box
         user_text = user_message_input if user_message_input is not None and user_message_input.strip() else user_message_box
@@ -229,8 +254,7 @@ class OpenRouterNode:
                         }
                     })
                 except Exception as e:
-                    print(f"Error processing {image_key}: {e}")
-                    return (f"Error processing {image_key}: {e}", placeholder_image, "Stats N/A", "Credits N/A", 0.0)
+                    raise RuntimeError(f"Error processing {image_key}: {e}") from e
 
         # 3. Add PDF part (optional)
         pdf_filename = "document.pdf"  # Default filename if not provided
@@ -253,8 +277,7 @@ class OpenRouterNode:
                         }
                     })
                 except Exception as e:
-                    print(f"Error encoding PDF: {e}")
-                    return (f"Error encoding PDF: {e}", placeholder_image, "Stats N/A", "Credits N/A", 0.0)
+                    raise RuntimeError(f"Error encoding PDF: {e}") from e
             else:
                 # Handle case where pdf_data is not in the expected format
                 print(f"Warning: pdf_data input is not in the expected format (dict with 'filename' and 'bytes'). PDF not included.")
@@ -298,6 +321,9 @@ class OpenRouterNode:
             data["reasoning"] = {"effort": validated_reasoning_effort}
         if service_tier != "auto":
             data["service_tier"] = service_tier
+        if schema is not None:
+            data["response_format"] = {"type": "json_schema", "json_schema": {"name": "response", "strict": True, "schema": schema}}
+            data.setdefault("provider", {})["require_parameters"] = True
 
         print(f"Payload: model={modified_model}")
 
@@ -382,6 +408,12 @@ class OpenRouterNode:
                                     print(f"Error decoding image: {e}")
                 text_output = "\n".join(text_parts)
 
+            if schema is not None:
+                try:
+                    json.loads(text_output)
+                except (TypeError, json.JSONDecodeError) as e:
+                    raise RuntimeError(f"Reply is not valid JSON: {e}") from e
+
             response_ms = result.get("response_ms", None)
             api_usage = result.get("usage", {})
             prompt_tokens = api_usage.get("prompt_tokens", text_token_estimate)
@@ -444,11 +476,7 @@ class OpenRouterNode:
                     error_message += f" | Status: {e.response.status_code} | Response: {e.response.text[:200]}"
             else:
                 error_message += " (Network or connection issue)"
-            print(f"ERROR: {error_message}")
-            return (error_message, placeholder_image, "Stats N/A due to error", "Credits N/A due to error", 0.0)
-        except Exception as e:
-            print(f"ERROR: Node Error: {str(e)}")
-            return (f"Node Error: {str(e)}", placeholder_image, "Stats N/A due to error", "Credits N/A due to error", 0.0)
+            raise RuntimeError(error_message) from e
 
     @staticmethod
     def image_to_base64(image):
@@ -478,7 +506,8 @@ class OpenRouterNode:
     def IS_CHANGED(cls, api_key, system_prompt, user_message_box, model,
                    web_search, cheapest, fastest, temperature, pdf_engine, chat_mode,
                    request_timeout=120, aspect_ratio="auto", image_resolution="1K", seed=0,
-                   pdf_data=None, user_message_input=None, reasoning_effort="auto", service_tier="auto", **kwargs):
+                   pdf_data=None, user_message_input=None, reasoning_effort="auto", service_tier="auto",
+                   on_error="block", unique_id=None, json_schema="", **kwargs):
         """
         Check if any input that affects the output has changed.
         Includes hashing image and PDF data.
@@ -536,7 +565,8 @@ class OpenRouterNode:
         return (api_key, system_prompt, user_message_box, model,
                 web_search, cheapest, fastest, temp_float, pdf_engine, chat_mode,
                 timeout_int, aspect_ratio, image_resolution, seed, validated_reasoning_effort,
-                tuple(image_hashes), pdf_hash, user_message_input, service_tier)
+                tuple(image_hashes), pdf_hash, user_message_input, service_tier,
+                on_error, cls.failures.get(unique_id, 0), json_schema)
 
 
 # Node class mappings

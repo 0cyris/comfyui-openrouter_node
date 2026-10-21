@@ -136,7 +136,7 @@ class NodeKeyTests(unittest.TestCase):
             self.decide()
         result, post = self.chat()
         post.assert_not_called()
-        self.assertIn("API Key not provided", result[0])
+        self.assertTrue(result[2].startswith("FAILED: API Key not provided"))
 
 
 class PlaceholderTests(unittest.TestCase):
