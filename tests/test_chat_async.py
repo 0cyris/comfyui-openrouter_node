@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import inspect
+import json
 import os
 import sys
 import time
@@ -261,6 +262,92 @@ class OnErrorTests(unittest.TestCase):
 
         self.assertTrue(result[2].startswith("FAILED:"))
         node.chat_manager.save_conversation.assert_not_called()
+
+
+SCHEMA = {"type": "object", "properties": {"a": {"type": "integer"}}, "required": ["a"], "additionalProperties": False}
+
+
+class JsonSchemaTests(unittest.TestCase):
+    def sent_payload(self, **kwargs):
+        with patch.object(node_module.requests, "post", return_value=make_response('{"a": 1}')) as post:
+            asyncio.run(respond(make_node(), **kwargs))
+        return post.call_args.kwargs["json"]
+
+    def test_json_schema_is_last_widget(self):
+        with patch.object(Node, "fetch_openrouter_models", return_value=["openai/gpt-4o"]):
+            inputs = Node.INPUT_TYPES()
+        self.assertEqual(list(inputs["optional"])[-1], "json_schema")
+        self.assertTrue(inputs["optional"]["json_schema"][1]["multiline"])
+
+    def test_empty_schema_sends_nothing(self):
+        for value in ({}, {"json_schema": ""}, {"json_schema": "  \n"}):
+            payload = self.sent_payload(**value)
+            self.assertNotIn("response_format", payload)
+            self.assertNotIn("provider", payload)
+
+    def test_schema_sends_response_format_and_require_parameters(self):
+        payload = self.sent_payload(json_schema=json.dumps(SCHEMA))
+        self.assertEqual(payload["response_format"], {
+            "type": "json_schema",
+            "json_schema": {"name": "response", "strict": True, "schema": SCHEMA},
+        })
+        self.assertEqual(payload["provider"], {"require_parameters": True})
+
+    def test_schema_combines_with_model_modifiers(self):
+        with patch.object(node_module.requests, "post", return_value=make_response('{"a": 1}')) as post:
+            asyncio.run(node_respond_cheapest(json.dumps(SCHEMA)))
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["model"], "openai/gpt-4o:floor")
+        self.assertIn("response_format", payload)
+
+    def test_invalid_schema_fails_before_any_request(self):
+        with patch.object(node_module.requests, "post") as post:
+            result = asyncio.run(respond(make_node(), json_schema="{not json"))
+            post.assert_not_called()
+            self.assertTrue(result[2].startswith("FAILED: json_schema is not valid JSON"))
+            with self.assertRaisesRegex(RuntimeError, "json_schema is not valid JSON"):
+                asyncio.run(respond(make_node(), json_schema="{not json", on_error="raise"))
+
+    def test_non_json_reply_goes_through_on_error(self):
+        with patch.object(node_module.requests, "post", return_value=make_response("Sure! here you go")):
+            result = asyncio.run(respond(make_node(), json_schema=json.dumps(SCHEMA)))
+            self.assertIsInstance(result[0], ExecutionBlocker)
+            self.assertTrue(result[2].startswith("FAILED: Reply is not valid JSON"))
+            with self.assertRaisesRegex(RuntimeError, "Reply is not valid JSON"):
+                asyncio.run(respond(make_node(), json_schema=json.dumps(SCHEMA), on_error="raise"))
+
+    def test_non_json_reply_is_fine_without_schema(self):
+        with patch.object(node_module.requests, "post", return_value=make_response("plain text")):
+            result = asyncio.run(respond(make_node()))
+        self.assertEqual(result[0], "plain text")
+
+    def test_valid_reply_comes_out_unchanged(self):
+        raw = '{"a":   1}'
+        with patch.object(node_module.requests, "post", return_value=make_response(raw)):
+            result = asyncio.run(respond(make_node(), json_schema=json.dumps(SCHEMA)))
+        self.assertEqual(result[0], raw)
+
+    def test_failed_json_reply_is_not_saved_in_chat_mode(self):
+        node = make_node()
+        node.chat_manager = Mock()
+        node.chat_manager.get_or_create_session.return_value = ("session", [{"role": "system", "content": "system"}])
+        with patch.object(node_module.requests, "post", return_value=make_response("nope")):
+            asyncio.run(node.generate_response(
+                api_key="test-key", system_prompt="system", user_message_box="hello", model="openai/gpt-4o",
+                web_search=False, cheapest=False, fastest=False, temperature=1.0, pdf_engine="auto",
+                chat_mode=True, json_schema=json.dumps(SCHEMA)))
+        node.chat_manager.save_conversation.assert_not_called()
+
+    def test_schema_changes_cache_key(self):
+        self.assertNotEqual(is_changed(), is_changed(json_schema=json.dumps(SCHEMA)))
+        self.assertEqual(is_changed(), is_changed(json_schema=""))
+
+
+def node_respond_cheapest(json_schema):
+    return make_node().generate_response(
+        api_key="test-key", system_prompt="system", user_message_box="hello", model="openai/gpt-4o",
+        web_search=False, cheapest=True, fastest=False, temperature=1.0, pdf_engine="auto", chat_mode=False,
+        json_schema=json_schema)
 
 
 if __name__ == "__main__":
