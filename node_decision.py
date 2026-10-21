@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 import requests
 import torch
 from PIL import Image
+from comfy_execution.graph_utils import ExecutionBlocker
 
 from . import openrouter_shared as shared
 
@@ -65,7 +66,8 @@ class OpenRouterDecisionNode:
       6) "best_index": index of that candidate (0 without candidates)
       7) "best_image": that candidate's original frame (a black 64x64 placeholder without candidates)
     Errors raise RuntimeError so ComfyUI shows them and caches nothing. With stop_on_false, a best candidate that is
-    not passed raises too.
+    not passed blocks best_image (on_false "block": only what uses it is skipped, the other outputs still report the
+    result) or raises (on_false "raise").
     """
 
     models_cache = None
@@ -102,6 +104,7 @@ class OpenRouterDecisionNode:
                 }),
                 "retries": ("INT", {"default": 1, "min": 0, "max": 5}),
                 "stop_on_false": ("BOOLEAN", {"default": False, "tooltip": "Stop the run with an error when the best candidate is not passed. Anything that waits for this node, e.g. a save fed from best_image, does not run."}),
+                "on_false": (["block", "raise"], {"default": "block", "tooltip": "With stop_on_false: block skips only what uses best_image, e.g. a save, and the rest of the run finishes; the other outputs still report the result. raise stops the whole run."}),
             },
             "optional": {
                 "candidates": ("IMAGE", {"tooltip": "Each frame is judged in its own request; the best one is returned as best_index and best_image."}),
@@ -180,7 +183,7 @@ class OpenRouterDecisionNode:
         return (text, value, value >= threshold, answer, cost)
 
     async def decide(self, api_key, model, question_type, instructions, criteria, true_guidance, false_guidance,
-                     state_text, threshold, request_timeout, retries, stop_on_false=False, candidates=None, **kwargs):
+                     state_text, threshold, request_timeout, retries, stop_on_false=False, on_false="block", candidates=None, **kwargs):
         api_key = shared.get_api_key()
         if not api_key:
             raise RuntimeError("API key not provided. Set LLM_KEY env var or use openrouter_api_key.json")
@@ -202,12 +205,16 @@ class OpenRouterDecisionNode:
         parsed = [self.parse_answer(result, payload, threshold) for result, payload in zip(results, payloads)]
         best = max(range(len(parsed)), key=lambda i: parsed[i][1])
         text, value, passed, _, _ = parsed[best]
-        if stop_on_false and not passed:
-            raise RuntimeError(f"Decision check failed: answer {text}, value {value:.2f} is below threshold {threshold:.2f}")
         if candidates is None:
             details, best_image = parsed[0][3], torch.zeros((1, 64, 64, 3), dtype=torch.float32)
         else:
             details, best_image = [p[3] for p in parsed], candidates[best:best + 1].clone()
+        if stop_on_false and not passed:
+            message = f"Decision check failed: answer {text}, value {value:.2f} is below threshold {threshold:.2f}"
+            if on_false == "raise":
+                raise RuntimeError(message)
+            print(f"[DecisionNode] {message}, blocking what uses best_image")
+            best_image = ExecutionBlocker(message)
         return (text, value, passed, json.dumps(details), sum(p[4] for p in parsed), best, best_image)
 
 

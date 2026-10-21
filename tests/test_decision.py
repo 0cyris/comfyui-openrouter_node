@@ -287,13 +287,21 @@ class CandidateTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "OpenRouter Decision error 400: bad image"):
                 decide(candidates=candidates(3))
 
-    def test_stop_on_false_raises_for_a_failed_best_candidate(self):
+    def test_stop_on_false_blocks_best_image_for_a_failed_best_candidate(self):
+        outputs, _, _ = self.run_batch([0.1, 0.3], stop_on_false=True)
+        self.assertIsInstance(outputs[6], node_module.ExecutionBlocker)
+        self.assertEqual(outputs[6].message, "Decision check failed: answer false, value 0.30 is below threshold 0.50")
+        self.assertEqual((outputs[0], outputs[2], outputs[5]), ("false", False, 1))
+        self.assertAlmostEqual(outputs[1], 0.3)
+
+    def test_stop_on_false_raises_for_a_failed_best_candidate_with_on_false_raise(self):
         with self.assertRaisesRegex(RuntimeError, r"Decision check failed: answer false, value 0\.30 is below threshold 0\.50"):
-            self.run_batch([0.1, 0.3], stop_on_false=True)
+            self.run_batch([0.1, 0.3], stop_on_false=True, on_false="raise")
 
     def test_stop_on_false_passes_when_best_candidate_passes(self):
         outputs, _, _ = self.run_batch([0.1, 0.8], stop_on_false=True)
         self.assertEqual((outputs[2], outputs[5]), (True, 1))
+        self.assertIsInstance(outputs[6], torch.Tensor)
 
     def test_failed_candidate_does_not_raise_by_default(self):
         outputs, _, _ = self.run_batch([0.1, 0.3])
