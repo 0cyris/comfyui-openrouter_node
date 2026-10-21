@@ -9,6 +9,7 @@ All node classes import from this module to avoid duplicating logic.
 import asyncio
 import requests
 import json
+import threading
 import time
 import base64
 import io
@@ -51,12 +52,11 @@ IMAGE_RESOLUTION_OPTIONS = ["1K", "2K", "4K"]
 
 AUDIO_FORMAT_OPTIONS = ("mp3", "pcm", "wav", "opus", "aac", "flac")
 
-# ── Module-level raw model cache ──────────────────────────────────────────────
-# One network fetch, shared across all node classes.
+# ── Background model list refresh ─────────────────────────────────────────────
 
-_raw_models_cache = None   # list[dict] from /api/v1/models
-_last_fetch_time = 0.0
-_cache_was_refreshed = False  # set True each time the cache is repopulated
+_refresh_lock = threading.Lock()
+_refresh_queue = {}  # node class -> load function
+_refresh_running = False
 
 # ── Optional audio libraries ──────────────────────────────────────────────────
 
@@ -123,33 +123,51 @@ def build_standard_headers(api_key):
 # ── Model fetching & filtering ────────────────────────────────────────────────
 
 def fetch_all_models_raw():
-    """
-    Fetches the full model list from the OpenRouter API with 1-hour caching.
+    """Fetches the full model list (list of model dicts) from GET /api/v1/models."""
+    response = requests.get(f"{BASE_URL}/models", timeout=DEFAULT_REQUEST_TIMEOUT)
+    response.raise_for_status()
+    return response.json()["data"]
 
-    Returns:
-        (model_list, was_refreshed)
-        - model_list: list of model dicts from /api/v1/models
-        - was_refreshed: True when the cache was just repopulated this call,
-          signalling per-node filtered caches to rebuild.
+
+def cached_models(cls, load):
     """
-    global _raw_models_cache, _last_fetch_time, _cache_was_refreshed
-    current_time = time.time()
-    _cache_was_refreshed = False
-    if _raw_models_cache is None or (current_time - _last_fetch_time > CACHE_DURATION):
+    Returns the node's model list without waiting on the network.
+
+    The result is cls.models_cache, or cls._fallback_models until the first
+    refresh succeeds. When the list is missing or older than cls.cache_duration,
+    load() is queued on the single background worker; it sets cls.models_cache
+    (and any node data next to it). A failed load keeps the previous list.
+    """
+    global _refresh_running
+    if not _is_fresh(cls):
+        with _refresh_lock:
+            _refresh_queue[cls] = load
+            start = not _refresh_running
+            _refresh_running = True
+        if start:
+            threading.Thread(target=_run_refreshes, daemon=True).start()
+    return cls.models_cache if cls.models_cache is not None else cls._fallback_models[:]
+
+
+def _is_fresh(cls):
+    return cls.models_cache is not None and time.time() - cls.last_fetch_time <= cls.cache_duration
+
+
+def _run_refreshes():
+    global _refresh_running
+    while True:
+        with _refresh_lock:
+            if not _refresh_queue:
+                _refresh_running = False
+                return
+            cls, load = _refresh_queue.popitem()
+        if _is_fresh(cls):
+            continue
         try:
-            response = requests.get(
-                f"{BASE_URL}/models",
-                timeout=DEFAULT_REQUEST_TIMEOUT
-            )
-            response.raise_for_status()
-            _raw_models_cache = response.json()["data"]
-            _last_fetch_time = current_time
-            _cache_was_refreshed = True
-        except requests.exceptions.RequestException as e:
-            print(f"[openrouter_shared] Error fetching models: {e}")
-            if _raw_models_cache is None:
-                _raw_models_cache = []
-    return _raw_models_cache, _cache_was_refreshed
+            load()
+            cls.last_fetch_time = time.time()
+        except Exception as e:
+            print(f"[openrouter_shared] Error fetching {cls.__name__} models: {e}")
 
 
 def filter_models_by_output(models, output_modality):
@@ -206,51 +224,40 @@ def filter_models_by_input(models, input_modality):
     return sorted(result)
 
 
-def fetch_filtered_models(cls, output_modality, fallback_models, log_prefix):
+def fetch_filtered_models(cls, output_modality):
     """
     Shared model-list fetcher for all modality-specific nodes.
 
-    Fetches GET /api/v1/models?output_modalities=<output_modality> with a
-    per-class 1-hour cache.  Each node passes its own class so the cache is
-    stored in the node's class attributes (cls.models_cache / cls.last_fetch_time)
-    rather than in a global dict — this keeps each node's list independent.
+    Fetches GET /api/v1/models?output_modalities=<output_modality> in the
+    background (see cached_models) and returns the last list, or
+    cls._fallback_models, immediately.
 
     cls must expose:
         cls.models_cache     — None or list[str]
         cls.last_fetch_time  — float (Unix timestamp, default 0)
         cls.cache_duration   — int seconds (default 3600)
-        cls._fallback_models — list[str] used when the API call fails and
-                               there is no existing cache
+        cls._fallback_models — list[str] shown until the first fetch succeeds
 
     Args:
         cls:              The calling node class (passed as the first arg of
                           a classmethod).
         output_modality:  Value for the ?output_modalities= query parameter
                           (e.g. "speech", "transcription", "image", "rerank").
-        fallback_models:  list[str] of hardcoded model IDs used on error.
-        log_prefix:       String prepended to log messages, e.g. "[SpeechNode]".
 
     Returns:
         list[str] of model IDs, sorted alphabetically.
     """
-    current_time = time.time()
-    if cls.models_cache is None or (current_time - cls.last_fetch_time > cls.cache_duration):
-        try:
-            response = requests.get(
-                f"{BASE_URL}/models",
-                params={"output_modalities": output_modality},
-                timeout=DEFAULT_REQUEST_TIMEOUT,
-            )
-            response.raise_for_status()
-            data = response.json().get("data", [])
-            models = sorted(m["id"] for m in data if m.get("id"))
-            cls.models_cache = models if models else fallback_models[:]
-            cls.last_fetch_time = current_time
-        except Exception as e:
-            print(f"{log_prefix} Error fetching {output_modality} models: {e}")
-            if cls.models_cache is None:
-                cls.models_cache = fallback_models[:]
-    return cls.models_cache
+    def load():
+        response = requests.get(
+            f"{BASE_URL}/models",
+            params={"output_modalities": output_modality},
+            timeout=DEFAULT_REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json().get("data", [])
+        cls.models_cache = sorted(m["id"] for m in data if m.get("id")) or cls._fallback_models[:]
+
+    return cached_models(cls, load)
 
 
 def get_model_details(model_id, api_key=None, timeout=None):

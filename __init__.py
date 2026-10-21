@@ -12,6 +12,9 @@ import json
 NODE_CLASS_MAPPINGS = {**_T, **_I, **_IA, **_D, **_S, **_TR, **_RR, **_V}
 NODE_DISPLAY_NAME_MAPPINGS = {**_TN, **_IN, **_IAN, **_DN, **_SN, **_TRN, **_RRN, **_VN}
 
+for node in NODE_CLASS_MAPPINGS.values():
+    node.fetch_openrouter_models()
+
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
 

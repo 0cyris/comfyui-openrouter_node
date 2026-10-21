@@ -85,7 +85,11 @@ class OpenRouterImageGenNode:
     @classmethod
     def fetch_openrouter_models(cls):
         """Fetches image-output model IDs via GET /api/v1/models?output_modalities=image."""
-        return shared.fetch_filtered_models(cls, "image", cls._fallback_models, "[ImageGenNode]")
+        return shared.fetch_filtered_models(cls, "image")
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, model):
+        return cls.models_cache is None or model in cls.models_cache or f"{model} is not in the OpenRouter model list"
 
     def generate_image(self, api_key, prompt, model,
                        web_search=False, cheapest=False, fastest=False,

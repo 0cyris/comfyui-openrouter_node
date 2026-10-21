@@ -89,7 +89,11 @@ class OpenRouterTranscriptionNode:
     @classmethod
     def fetch_openrouter_models(cls):
         """Fetches STT model IDs via GET /api/v1/models?output_modalities=transcription."""
-        return shared.fetch_filtered_models(cls, "transcription", cls._fallback_models, "[TranscriptionNode]")
+        return shared.fetch_filtered_models(cls, "transcription")
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, model):
+        return cls.models_cache is None or model in cls.models_cache or f"{model} is not in the OpenRouter model list"
 
     def transcribe(self, api_key, audio, model,
                    language="", audio_format="wav",

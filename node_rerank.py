@@ -98,7 +98,11 @@ class OpenRouterRerankNode:
     @classmethod
     def fetch_openrouter_models(cls):
         """Fetches rerank model IDs via GET /api/v1/models?output_modalities=rerank."""
-        return shared.fetch_filtered_models(cls, "rerank", cls._fallback_models, "[RerankNode]")
+        return shared.fetch_filtered_models(cls, "rerank")
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, model):
+        return cls.models_cache is None or model in cls.models_cache or f"{model} is not in the OpenRouter model list"
 
     def rerank(self, api_key, query, documents, model,
                top_n, request_timeout):
