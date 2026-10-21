@@ -9,5 +9,3 @@ status: accepted
 ## Consequences
 
 A typo in a model id reaches OpenRouter and fails there, not in ComfyUI validation. Right after a restart, the lists can show fallbacks. Code that reads per-model parameters must allow for them being empty early.
-
-On `staging` (issue #2). `main` still fetches synchronously until `staging` is merged.

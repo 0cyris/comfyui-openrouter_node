@@ -11,5 +11,3 @@ The key comes only from the `LLM_KEY` environment variable, then `openrouter_api
 - Blank the field on save, as upstream does: rejected; the key still reaches the queued prompt and the image metadata.
 - Delete the widget: rejected; it breaks saved workflows, including the character-sheet workflows.
 - `options.serialize = false`: rejected; it drops a required input and fails server validation.
-
-On `staging` (issue #4). `main` still reads the widget first until `staging` is merged.
