@@ -14,6 +14,10 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 This clone has two remotes: `ocyris` (the fork, where issues live) and `origin` (upstream gabe-init/ComfyUI-Openrouter_node). `gh` may resolve a fork to its upstream, so always pass `-R 0cyris/comfyui-openrouter_node` to `gh issue`, `gh label` and `gh api` calls instead of relying on inference. In `gh api` paths, `<owner>/<repo>` is `0cyris/comfyui-openrouter_node`.
 
+## Pull requests
+
+Open PRs against `staging`: `gh pr create -R 0cyris/comfyui-openrouter_node --base staging`. `staging` is merged into `main` later. `Closes #N` only fires on merges into the default branch (`main`), so an issue fixed on `staging` stays open until `staging` is merged into `main`.
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_

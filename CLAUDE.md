@@ -1,3 +1,7 @@
+## Branches
+
+PRs target `staging` (`gh pr create --base staging`), not `main`. `staging` is a permanent integration branch that is merged into `main` later. Branch feature work from `ocyris/staging`.
+
 ## Agent skills
 
 ### Issue tracker
