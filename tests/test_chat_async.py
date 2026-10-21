@@ -43,10 +43,18 @@ def make_response(text="done", cost=None):
     return response
 
 
-def respond(node):
+def respond(node, **kwargs):
     return node.generate_response(
         api_key="test-key", system_prompt="system", user_message_box="hello", model="openai/gpt-4o",
-        web_search=False, cheapest=False, fastest=False, temperature=1.0, pdf_engine="auto", chat_mode=False)
+        web_search=False, cheapest=False, fastest=False, temperature=1.0, pdf_engine="auto", chat_mode=False,
+        **kwargs)
+
+
+def is_changed(**kwargs):
+    return Node.IS_CHANGED(
+        api_key="test-key", system_prompt="system", user_message_box="hello", model="openai/gpt-4o",
+        web_search=False, cheapest=False, fastest=False, temperature=1.0, pdf_engine="auto", chat_mode=False,
+        **kwargs)
 
 
 def make_node():
@@ -124,6 +132,51 @@ class ChatAsyncTests(unittest.TestCase):
 
         self.assertEqual([r[0] for r in results], ["done", "done"])
         self.assertLess(elapsed, 0.9)
+
+
+def make_tier_response(service_tier):
+    response = make_response()
+    response.json.return_value["service_tier"] = service_tier
+    return response
+
+
+class ServiceTierTests(unittest.TestCase):
+    def sent_payload(self, **kwargs):
+        with patch.object(node_module.requests, "post", return_value=make_response()) as post:
+            asyncio.run(respond(make_node(), **kwargs))
+        return post.call_args.kwargs["json"]
+
+    def test_service_tier_is_last_required_widget(self):
+        with patch.object(Node, "fetch_openrouter_models", return_value=["openai/gpt-4o"]):
+            required = Node.INPUT_TYPES()["required"]
+        self.assertEqual(list(required)[-1], "service_tier")
+        self.assertEqual(required["service_tier"][0], ["auto", "default", "flex", "priority", "ultrafast"])
+        self.assertEqual(required["service_tier"][1], {"default": "auto"})
+
+    def test_auto_sends_no_service_tier(self):
+        self.assertNotIn("service_tier", self.sent_payload())
+        self.assertNotIn("service_tier", self.sent_payload(service_tier="auto"))
+
+    def test_explicit_tier_is_sent(self):
+        for tier in ("default", "flex", "priority", "ultrafast"):
+            with self.subTest(tier=tier):
+                self.assertEqual(self.sent_payload(service_tier=tier)["service_tier"], tier)
+
+    def test_response_tier_shown_in_stats(self):
+        with patch.object(node_module.requests, "post", return_value=make_tier_response("flex")):
+            result = asyncio.run(respond(make_node(), service_tier="flex"))
+        self.assertIn("Service tier: flex", result[2])
+
+    def test_missing_or_null_response_tier_leaves_stats_unchanged(self):
+        for response in (make_response(), make_tier_response(None)):
+            with patch.object(node_module.requests, "post", return_value=response):
+                result = asyncio.run(respond(make_node()))
+            self.assertEqual(result[0], "done")
+            self.assertNotIn("Service tier", result[2])
+
+    def test_changing_service_tier_changes_cache_key(self):
+        self.assertNotEqual(is_changed(service_tier="auto"), is_changed(service_tier="flex"))
+        self.assertEqual(is_changed(), is_changed(service_tier="auto"))
 
 
 if __name__ == "__main__":

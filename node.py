@@ -92,6 +92,7 @@ class OpenRouterNode:
                     "step": 1,
                     "display": "number",
                 }),
+                "service_tier": (["auto", "default", "flex", "priority", "ultrafast"], {"default": "auto"}),
             },
             "optional": {
                 "pdf_data": (PDF_DATA_TYPE,),  # Use '*' and check structure in generate_response
@@ -165,7 +166,7 @@ class OpenRouterNode:
     def _generate_response(self, api_key, system_prompt, user_message_box, model,
                          web_search, cheapest, fastest, temperature, pdf_engine, chat_mode,
                          request_timeout=120, aspect_ratio="auto", image_resolution="1K", seed=0,
-                         pdf_data=None, user_message_input=None, reasoning_effort="auto", **kwargs):
+                         pdf_data=None, user_message_input=None, reasoning_effort="auto", service_tier="auto", **kwargs):
         """
         Sends a completion request to the OpenRouter chat completion endpoint.
         Handles text, optional image, and optional PDF inputs.
@@ -307,6 +308,8 @@ class OpenRouterNode:
         }
         if validated_reasoning_effort != "auto":
             data["reasoning"] = {"effort": validated_reasoning_effort}
+        if service_tier != "auto":
+            data["service_tier"] = service_tier
 
         print(f"Payload: model={modified_model}")
 
@@ -415,6 +418,8 @@ class OpenRouterNode:
             extra_parts = []
             if pdf_engine != "auto":
                 extra_parts.append(f"PDF Engine: {pdf_engine}")
+            if result.get("service_tier"):
+                extra_parts.append(f"Service tier: {result['service_tier']}")
             if validated_reasoning_effort != "auto":
                 extra_parts.append(f"Reasoning: {validated_reasoning_effort}")
             extra_parts.append(f"Cost: {cost}")
@@ -485,7 +490,7 @@ class OpenRouterNode:
     def IS_CHANGED(cls, api_key, system_prompt, user_message_box, model,
                    web_search, cheapest, fastest, temperature, pdf_engine, chat_mode,
                    request_timeout=120, aspect_ratio="auto", image_resolution="1K", seed=0,
-                   pdf_data=None, user_message_input=None, reasoning_effort="auto", **kwargs):
+                   pdf_data=None, user_message_input=None, reasoning_effort="auto", service_tier="auto", **kwargs):
         """
         Check if any input that affects the output has changed.
         Includes hashing image and PDF data.
@@ -544,7 +549,7 @@ class OpenRouterNode:
         return (api_key, system_prompt, user_message_box, model,
                 web_search, cheapest, fastest, temp_float, pdf_engine, chat_mode,
                 timeout_int, aspect_ratio, image_resolution, seed, validated_reasoning_effort,
-                tuple(image_hashes), pdf_hash, user_message_input)
+                tuple(image_hashes), pdf_hash, user_message_input, service_tier)
 
 
 # Node class mappings
