@@ -16,7 +16,7 @@ This clone has two remotes: `ocyris` (the fork, where issues live) and `origin` 
 
 ## Pull requests
 
-Open PRs against `staging`: `gh pr create -R 0cyris/comfyui-openrouter_node --base staging`. `staging` is merged into `main` later. `Closes #N` only fires on merges into the default branch (`main`), so an issue fixed on `staging` stays open until `staging` is merged into `main`.
+Open PRs against `staging`: `gh pr create -R 0cyris/comfyui-openrouter_node --base staging`. `staging` is merged into `main` later. `Closes #N` only fires on merges into the default branch (`main`), so after a PR lands on `staging`, close its issue by hand: `gh issue close <n> -R 0cyris/comfyui-openrouter_node --comment "Fixed by #<pr>, merged into \`staging\` in <sha>."`
 
 ## Pull requests as a triage surface
 
