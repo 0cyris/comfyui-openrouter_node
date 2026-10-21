@@ -199,10 +199,9 @@ class RequestTimeoutTests(unittest.TestCase):
 
         result = self.call_generate_response(request_timeout=2)
 
-        self.assertIn("API Request Error", result[0])
-        self.assertIn("request timed out", result[0])
-        self.assertEqual(result[2], "Stats N/A due to error")
-        self.assertEqual(result[3], "Credits N/A due to error")
+        self.assertTrue(result[2].startswith("FAILED: API Request Error"))
+        self.assertIn("request timed out", result[2])
+        self.assertEqual(result[3], "")
 
     def test_fetch_credits_uses_configured_timeout(self):
         self.node.fetch_credits = self.node_module.OpenRouterNode().fetch_credits

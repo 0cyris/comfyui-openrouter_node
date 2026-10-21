@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from comfy_execution.graph_utils import ExecutionBlocker
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parents[1]))
 
@@ -103,13 +105,6 @@ class ChatAsyncTests(unittest.TestCase):
         self.assertEqual(result[4], 0.0)
         self.assertIn("Cost: 0.0", result[2])
 
-    def test_error_return_has_zero_cost(self):
-        with patch.object(node_module.requests, "post", side_effect=node_module.requests.exceptions.Timeout("request timed out")):
-            result = asyncio.run(respond(make_node()))
-
-        self.assertEqual(len(result), 5)
-        self.assertEqual(result[4], 0.0)
-
     def test_chat_mode_keeps_working_with_cost(self):
         node = make_node()
         node.chat_manager = Mock()
@@ -153,10 +148,10 @@ class ServiceTierTests(unittest.TestCase):
             asyncio.run(respond(make_node(), **kwargs))
         return post.call_args.kwargs["json"]
 
-    def test_service_tier_is_last_required_widget(self):
+    def test_service_tier_precedes_on_error_widget(self):
         with patch.object(Node, "fetch_openrouter_models", return_value=["openai/gpt-4o"]):
             required = Node.INPUT_TYPES()["required"]
-        self.assertEqual(list(required)[-1], "service_tier")
+        self.assertEqual(list(required)[-2:], ["service_tier", "on_error"])
         self.assertEqual(required["service_tier"][0], ["auto", "default", "flex", "priority", "ultrafast"])
         self.assertEqual(required["service_tier"][1], {"default": "auto"})
 
@@ -184,6 +179,88 @@ class ServiceTierTests(unittest.TestCase):
     def test_changing_service_tier_changes_cache_key(self):
         self.assertNotEqual(is_changed(service_tier="auto"), is_changed(service_tier="flex"))
         self.assertEqual(is_changed(), is_changed(service_tier="auto"))
+
+
+class OnErrorTests(unittest.TestCase):
+    def setUp(self):
+        Node.failures.clear()
+
+    def failing_post(self):
+        return patch.object(node_module.requests, "post", side_effect=node_module.requests.exceptions.Timeout("request timed out"))
+
+    def test_on_error_is_last_required_widget(self):
+        with patch.object(Node, "fetch_openrouter_models", return_value=["openai/gpt-4o"]):
+            inputs = Node.INPUT_TYPES()
+        self.assertEqual(list(inputs["required"])[-1], "on_error")
+        self.assertEqual(inputs["required"]["on_error"][0], ["block", "raise"])
+        self.assertEqual(inputs["required"]["on_error"][1]["default"], "block")
+        self.assertIn("unique_id", inputs["hidden"])
+
+    def test_block_returns_blockers_and_failed_stats(self):
+        with self.failing_post():
+            result = asyncio.run(respond(make_node(), unique_id="1"))
+
+        self.assertEqual(len(result), 5)
+        self.assertIsInstance(result[0], ExecutionBlocker)
+        self.assertIsInstance(result[1], ExecutionBlocker)
+        self.assertTrue(result[2].startswith("FAILED:"))
+        self.assertIn("request timed out", result[2])
+        self.assertEqual(result[3], "")
+        self.assertEqual(result[4], 0.0)
+
+    def test_block_is_the_default(self):
+        with self.failing_post():
+            result = asyncio.run(respond(make_node()))
+        self.assertIsInstance(result[0], ExecutionBlocker)
+
+    def test_raise_propagates_the_error(self):
+        with self.failing_post(), self.assertRaisesRegex(RuntimeError, "request timed out"):
+            asyncio.run(respond(make_node(), on_error="raise", unique_id="1"))
+
+    def test_failure_changes_is_changed_for_that_node_only(self):
+        before = is_changed(unique_id="1")
+        with self.failing_post():
+            asyncio.run(respond(make_node(), unique_id="1"))
+        self.assertNotEqual(before, is_changed(unique_id="1"))
+        self.assertEqual(before, is_changed(unique_id="2"))
+
+    def test_raise_does_not_count_a_failure(self):
+        before = is_changed(unique_id="1")
+        with self.failing_post(), self.assertRaises(RuntimeError):
+            asyncio.run(respond(make_node(), on_error="raise", unique_id="1"))
+        self.assertEqual(before, is_changed(unique_id="1"))
+
+    def test_missing_api_key_goes_through_on_error(self):
+        with patch.dict(os.environ, {"LLM_KEY": ""}), patch.object(node_module.shared, "get_api_key", return_value=None):
+            result = asyncio.run(respond(make_node()))
+            self.assertTrue(result[2].startswith("FAILED: API Key not provided"))
+            with self.assertRaisesRegex(RuntimeError, "API Key not provided"):
+                asyncio.run(respond(make_node(), on_error="raise"))
+
+    def test_bad_response_shape_goes_through_on_error(self):
+        bad = Mock()
+        bad.json.return_value = {"choices": []}
+        with patch.object(node_module.requests, "post", return_value=bad):
+            result = asyncio.run(respond(make_node()))
+        self.assertTrue(result[2].startswith("FAILED: Invalid response format"))
+
+    def test_image_encoding_error_goes_through_on_error(self):
+        with patch.object(Node, "image_to_base64", side_effect=ValueError("bad tensor")):
+            result = asyncio.run(respond(make_node(), image_1=object()))
+        self.assertTrue(result[2].startswith("FAILED: Error processing image_1: bad tensor"))
+
+    def test_failed_chat_turn_is_not_saved(self):
+        node = make_node()
+        node.chat_manager = Mock()
+        node.chat_manager.get_or_create_session.return_value = ("session", [{"role": "system", "content": "system"}])
+        with self.failing_post():
+            result = asyncio.run(node.generate_response(
+                api_key="test-key", system_prompt="system", user_message_box="hello", model="openai/gpt-4o",
+                web_search=False, cheapest=False, fastest=False, temperature=1.0, pdf_engine="auto",
+                chat_mode=True))
+
+        self.assertTrue(result[2].startswith("FAILED:"))
+        node.chat_manager.save_conversation.assert_not_called()
 
 
 if __name__ == "__main__":
