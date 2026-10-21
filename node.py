@@ -97,6 +97,7 @@ class OpenRouterNode:
             "optional": {
                 "pdf_data": (PDF_DATA_TYPE,),  # Use '*' and check structure in generate_response
                 "user_message_input": ("STRING", {"forceInput": True}),
+                "json_schema": ("STRING", {"multiline": True, "default": "", "tooltip": "Optional JSON Schema object. When set, the reply must be JSON matching it (structured output). Empty: off."}),
             }
         }
 
@@ -171,7 +172,7 @@ class OpenRouterNode:
     def _request(self, api_key, system_prompt, user_message_box, model,
                          web_search, cheapest, fastest, temperature, pdf_engine, chat_mode,
                          request_timeout=120, aspect_ratio="auto", image_resolution="1K", seed=0,
-                         pdf_data=None, user_message_input=None, reasoning_effort="auto", service_tier="auto", **kwargs):
+                         pdf_data=None, user_message_input=None, reasoning_effort="auto", service_tier="auto", json_schema="", **kwargs):
         """
         Sends a completion request to the OpenRouter chat completion endpoint.
         Handles text, optional image, and optional PDF inputs.
@@ -199,6 +200,13 @@ class OpenRouterNode:
         validated_temp = self.validate_temperature(temperature)
         validated_timeout = self.validate_request_timeout(request_timeout)
         validated_reasoning_effort = self.validate_reasoning_effort(reasoning_effort)
+
+        schema = None
+        if json_schema.strip():
+            try:
+                schema = json.loads(json_schema)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"json_schema is not valid JSON: {e}") from e
 
         # Decide whether to use user_message_input or user_message_box
         user_text = user_message_input if user_message_input is not None and user_message_input.strip() else user_message_box
@@ -313,6 +321,9 @@ class OpenRouterNode:
             data["reasoning"] = {"effort": validated_reasoning_effort}
         if service_tier != "auto":
             data["service_tier"] = service_tier
+        if schema is not None:
+            data["response_format"] = {"type": "json_schema", "json_schema": {"name": "response", "strict": True, "schema": schema}}
+            data.setdefault("provider", {})["require_parameters"] = True
 
         print(f"Payload: model={modified_model}")
 
@@ -396,6 +407,12 @@ class OpenRouterNode:
                                 except Exception as e:
                                     print(f"Error decoding image: {e}")
                 text_output = "\n".join(text_parts)
+
+            if schema is not None:
+                try:
+                    json.loads(text_output)
+                except (TypeError, json.JSONDecodeError) as e:
+                    raise RuntimeError(f"Reply is not valid JSON: {e}") from e
 
             response_ms = result.get("response_ms", None)
             api_usage = result.get("usage", {})
@@ -490,7 +507,7 @@ class OpenRouterNode:
                    web_search, cheapest, fastest, temperature, pdf_engine, chat_mode,
                    request_timeout=120, aspect_ratio="auto", image_resolution="1K", seed=0,
                    pdf_data=None, user_message_input=None, reasoning_effort="auto", service_tier="auto",
-                   on_error="block", unique_id=None, **kwargs):
+                   on_error="block", unique_id=None, json_schema="", **kwargs):
         """
         Check if any input that affects the output has changed.
         Includes hashing image and PDF data.
@@ -549,7 +566,7 @@ class OpenRouterNode:
                 web_search, cheapest, fastest, temp_float, pdf_engine, chat_mode,
                 timeout_int, aspect_ratio, image_resolution, seed, validated_reasoning_effort,
                 tuple(image_hashes), pdf_hash, user_message_input, service_tier,
-                on_error, cls.failures.get(unique_id, 0))
+                on_error, cls.failures.get(unique_id, 0), json_schema)
 
 
 # Node class mappings

@@ -109,6 +109,7 @@ The nodes have no API key field, so your key never ends up in a workflow or in t
 - **pdf_data**: PDF document input for models that support document understanding.
 - **pdf_engine**: Choose between "auto", "mistral-ocr", or "pdf-text" for PDF processing.
 - **user_message_input**: Alternative input for the user message, useful for connecting to other nodes.
+- **json_schema** (optional, multiline): A JSON Schema object for structured output. Empty (default) is off. When set, the node sends it as OpenRouter's `response_format` (`json_schema`, strict) with `provider.require_parameters: true`, so only providers that honor structured outputs are used and `:floor`/`:nitro` still apply. The reply must parse as JSON, otherwise the request counts as a failure and follows `on_error`; `Output` is the raw JSON text. In strict mode every property must be listed in `required` and `additionalProperties` must be `false`. A schema that is not valid JSON fails before any request is sent. Models with no structured-output provider fail with OpenRouter's routing error. See [OpenRouter structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs).
 
 ### Outputs:
 
