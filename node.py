@@ -17,11 +17,12 @@ class OpenRouterNode:
     """
     A node for interacting with OpenRouter's chat/completion API.
     Supports text, images, and PDFs as input.
-    Returns four outputs:
+    Returns five outputs:
       1) "Output": the text response from the LLM
       2) "image": an image tensor if the response contains an image, else empty tensor
       3) "Stats": a string detailing tokens per second, input tokens, and output tokens
       4) "Credits": a string showing your remaining OpenRouter account balance
+      5) "cost": the request's cost in USD as a float (0.0 if the response reports none)
     """
 
     models_cache = None
@@ -98,8 +99,8 @@ class OpenRouterNode:
             }
         }
 
-    RETURN_TYPES = ("STRING", "IMAGE", "STRING", "STRING",)
-    RETURN_NAMES = ("Output", "image", "Stats", "Credits")
+    RETURN_TYPES = ("STRING", "IMAGE", "STRING", "STRING", "FLOAT",)
+    RETURN_NAMES = ("Output", "image", "Stats", "Credits", "cost")
 
     FUNCTION = "generate_response"
     CATEGORY = "LLM"
@@ -169,11 +170,12 @@ class OpenRouterNode:
         Sends a completion request to the OpenRouter chat completion endpoint.
         Handles text, optional image, and optional PDF inputs.
 
-        Returns four outputs:
+        Returns five outputs:
           (1) Output: the LLM's text response
           (2) image: an image tensor if the response contains an image, else empty tensor
           (3) Stats: a string with tokens per second, prompt tokens, completion tokens
           (4) Credits: a string with the user's credit information
+          (5) cost: the request's usage.cost in USD (0.0 if absent)
         """
         # Create empty placeholder image
         placeholder_image = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
@@ -182,7 +184,7 @@ class OpenRouterNode:
         api_key = self.get_api_key(api_key)
 
         if not api_key:
-            return ("Error: API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json", placeholder_image, "Stats N/A", "Credits N/A")
+            return ("Error: API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json", placeholder_image, "Stats N/A", "Credits N/A", 0.0)
 
         url = f"{shared.BASE_URL}/chat/completions"
         headers = shared.build_standard_headers(api_key)
@@ -239,7 +241,7 @@ class OpenRouterNode:
                     })
                 except Exception as e:
                     print(f"Error processing {image_key}: {e}")
-                    return (f"Error processing {image_key}: {e}", placeholder_image, "Stats N/A", "Credits N/A")
+                    return (f"Error processing {image_key}: {e}", placeholder_image, "Stats N/A", "Credits N/A", 0.0)
 
         # 3. Add PDF part (optional)
         pdf_filename = "document.pdf"  # Default filename if not provided
@@ -263,7 +265,7 @@ class OpenRouterNode:
                     })
                 except Exception as e:
                     print(f"Error encoding PDF: {e}")
-                    return (f"Error encoding PDF: {e}", placeholder_image, "Stats N/A", "Credits N/A")
+                    return (f"Error encoding PDF: {e}", placeholder_image, "Stats N/A", "Credits N/A", 0.0)
             else:
                 # Handle case where pdf_data is not in the expected format
                 print(f"Warning: pdf_data input is not in the expected format (dict with 'filename' and 'bytes'). PDF not included.")
@@ -393,6 +395,7 @@ class OpenRouterNode:
             api_usage = result.get("usage", {})
             prompt_tokens = api_usage.get("prompt_tokens", text_token_estimate)
             completion_tokens = api_usage.get("completion_tokens", 0)
+            cost = api_usage.get("cost") or 0.0
             if completion_tokens == 0 and text_output:
                 try:
                     completion_tokens = self.count_tokens(text_output, model)
@@ -414,10 +417,11 @@ class OpenRouterNode:
                 extra_parts.append(f"PDF Engine: {pdf_engine}")
             if validated_reasoning_effort != "auto":
                 extra_parts.append(f"Reasoning: {validated_reasoning_effort}")
+            extra_parts.append(f"Cost: {cost}")
 
             stats_text = shared.build_stats_text(
                 tps, prompt_tokens, completion_tokens, validated_temp, modified_model,
-                extra_parts if extra_parts else None
+                extra_parts
             )
 
             # Fetch credits information AFTER the main request
@@ -435,7 +439,7 @@ class OpenRouterNode:
                 # Save the updated conversation
                 self.chat_manager.save_conversation(session_path, messages)
 
-            return (text_output, image_tensor, stats_text, credits_text)
+            return (text_output, image_tensor, stats_text, credits_text, cost)
 
         except requests.exceptions.RequestException as e:
             error_message = f"API Request Error: {str(e)}"
@@ -448,10 +452,10 @@ class OpenRouterNode:
             else:
                 error_message += " (Network or connection issue)"
             print(f"ERROR: {error_message}")
-            return (error_message, placeholder_image, "Stats N/A due to error", "Credits N/A due to error")
+            return (error_message, placeholder_image, "Stats N/A due to error", "Credits N/A due to error", 0.0)
         except Exception as e:
             print(f"ERROR: Node Error: {str(e)}")
-            return (f"Node Error: {str(e)}", placeholder_image, "Stats N/A due to error", "Credits N/A due to error")
+            return (f"Node Error: {str(e)}", placeholder_image, "Stats N/A due to error", "Credits N/A due to error", 0.0)
 
     @staticmethod
     def image_to_base64(image):
