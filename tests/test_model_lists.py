@@ -145,9 +145,14 @@ class ModelListTests(unittest.TestCase):
         self.assertEqual(Speech.models_cache, ["x/speech"])
         self.assertEqual(len(out.getvalue().strip().splitlines()), 1)
 
-    def test_saved_model_missing_from_the_list_passes_validation(self):
+    def test_validation_accepts_any_model_until_a_list_is_fetched(self):
         for node in NODES:
             self.assertTrue(node.VALIDATE_INPUTS(model="saved/model"))
+
+    def test_validation_rejects_a_model_missing_from_the_fetched_list(self):
+        Speech.models_cache = ["x/speech"]
+        self.assertTrue(Speech.VALIDATE_INPUTS(model="x/speech"))
+        self.assertEqual(Speech.VALIDATE_INPUTS(model="y/speech"), "y/speech is not in the OpenRouter model list")
 
 
 if __name__ == "__main__":

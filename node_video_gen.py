@@ -110,8 +110,7 @@ class OpenRouterVideoGenNode:
 
     @classmethod
     def VALIDATE_INPUTS(cls, model):
-        # The model list loads in the background, so a saved model may not be in it yet
-        return True
+        return cls.models_cache is None or model in cls.models_cache or f"{model} is not in the OpenRouter model list"
 
     def generate_video(self, api_key, prompt, model,
                        web_search=False, cheapest=False, fastest=False,

@@ -93,8 +93,7 @@ class OpenRouterTranscriptionNode:
 
     @classmethod
     def VALIDATE_INPUTS(cls, model):
-        # The model list loads in the background, so a saved model may not be in it yet
-        return True
+        return cls.models_cache is None or model in cls.models_cache or f"{model} is not in the OpenRouter model list"
 
     def transcribe(self, api_key, audio, model,
                    language="", audio_format="wav",

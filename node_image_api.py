@@ -125,8 +125,7 @@ class OpenRouterImageAPINode:
 
     @classmethod
     def VALIDATE_INPUTS(cls, model):
-        # The model list loads in the background, so a saved model may not be in it yet
-        return True
+        return cls.models_cache is None or model in cls.models_cache or f"{model} is not in the OpenRouter model list"
 
     @classmethod
     def build_payload(cls, model, prompt, n, aspect_ratio, resolution, quality, background, seed, references):

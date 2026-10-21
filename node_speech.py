@@ -104,8 +104,7 @@ class OpenRouterSpeechNode:
 
     @classmethod
     def VALIDATE_INPUTS(cls, model):
-        # The model list loads in the background, so a saved model may not be in it yet
-        return True
+        return cls.models_cache is None or model in cls.models_cache or f"{model} is not in the OpenRouter model list"
 
     def _silent_audio(self):
         """Returns a silent 1-second mono audio placeholder."""
