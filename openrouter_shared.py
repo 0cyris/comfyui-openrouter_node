@@ -77,27 +77,24 @@ except ImportError:
 
 # ── API key resolution ────────────────────────────────────────────────────────
 
-def get_api_key(api_key_ui):
+API_KEY_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "openrouter_api_key.json")
+
+
+def get_api_key():
     """
     Resolves the API key from (in priority order):
-    1. UI input field (if non-empty)
-    2. Environment variable 'LLM_KEY'
-    3. JSON config file 'openrouter_api_key.json' in this module's directory
-    """
-    if api_key_ui and api_key_ui.strip():
-        return api_key_ui.strip()
+    1. Environment variable 'LLM_KEY'
+    2. JSON config file 'openrouter_api_key.json' in this module's directory
 
+    The key is never taken from a node widget, so it cannot end up in a workflow or prompt.
+    """
     env_key = os.environ.get("LLM_KEY")
     if env_key and env_key.strip():
         return env_key.strip()
 
-    config_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)),
-        "openrouter_api_key.json"
-    )
-    if os.path.exists(config_path):
+    if os.path.exists(API_KEY_FILE):
         try:
-            with open(config_path, 'r') as f:
+            with open(API_KEY_FILE, 'r') as f:
                 config = json.load(f)
                 file_key = config.get("api_key")
                 if file_key and file_key.strip():
@@ -106,6 +103,18 @@ def get_api_key(api_key_ui):
             print(f"Error reading openrouter_api_key.json: {e}")
 
     return ""
+
+
+def blank_prompt_api_keys(json_data, node_types):
+    """Prompt handler: empties the ignored api_key input of our nodes so a key sent by an old workflow or API client is never queued."""
+    ignored = False
+    for node in json_data.get("prompt", {}).values():
+        if node.get("class_type") in node_types and node["inputs"].get("api_key"):
+            node["inputs"]["api_key"] = ""
+            ignored = True
+    if ignored:
+        print("[OpenRouter] Ignored the api_key input. Keys are read only from the LLM_KEY env var or openrouter_api_key.json.")
+    return json_data
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────

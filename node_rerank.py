@@ -114,7 +114,6 @@ class OpenRouterRerankNode:
         Scalars are unwrapped with [0]; `documents` is used as-is.
         """
         # Unwrap scalar inputs
-        api_key_str      = api_key[0]       if isinstance(api_key, list)       else api_key
         query_str        = query[0]         if isinstance(query, list)         else query
         model_str        = model[0]         if isinstance(model, list)         else model
         top_n_int        = top_n[0]         if isinstance(top_n, list)         else top_n
@@ -126,7 +125,7 @@ class OpenRouterRerankNode:
 
         error_lists = ([], [], "Stats N/A", "")   # empty-list sentinel for list outputs
 
-        api_key_str = shared.get_api_key(api_key_str)
+        api_key_str = shared.get_api_key()
         if not api_key_str:
             return ([], [], "Stats N/A",
                     "Error: API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json")

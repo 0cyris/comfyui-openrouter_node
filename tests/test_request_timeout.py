@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import os
 import sys
 import types
 import unittest
@@ -82,6 +83,12 @@ def load_node_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def setUpModule():
+    patcher = patch.dict(os.environ, {"LLM_KEY": "test-key"})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 class RequestTimeoutTests(unittest.TestCase):

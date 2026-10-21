@@ -41,16 +41,6 @@ class OpenRouterNode:
     def __init__(self):
         self.chat_manager = ChatSessionManager()
 
-    @staticmethod
-    def get_api_key(api_key_ui):
-        """
-        Resolves the API key from:
-        1. UI input field (if not empty)
-        2. Environment variable 'LLM_KEY'
-        3. config file 'openrouter_api_key.json' in node directory
-        """
-        return shared.get_api_key(api_key_ui)
-
     @classmethod
     def INPUT_TYPES(cls):
         """
@@ -156,9 +146,6 @@ class OpenRouterNode:
         Fetches the user's credits information from the OpenRouter API.
         Returns a formatted string with remaining credits.
         """
-        api_key = self.get_api_key(api_key)
-        if not api_key:
-            return "API Key not provided."
         return shared.fetch_credits(api_key, timeout)
 
     async def generate_response(self, *args, **kwargs):
@@ -183,7 +170,7 @@ class OpenRouterNode:
         placeholder_image = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
 
         # Resolve API key
-        api_key = self.get_api_key(api_key)
+        api_key = shared.get_api_key()
 
         if not api_key:
             return ("Error: API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json", placeholder_image, "Stats N/A", "Credits N/A", 0.0)
@@ -544,9 +531,8 @@ class OpenRouterNode:
         validated_reasoning_effort = cls.validate_reasoning_effort(reasoning_effort)
 
         # Combine all relevant inputs into a tuple for comparison
-        # Note: api_key here is the UI value only. Keys resolved from the LLM_KEY
-        # env var or openrouter_api_key.json are intentionally NOT part of the
-        # cache key — they're treated as user environment, not workflow inputs.
+        # api_key is an ignored placeholder; keys from the LLM_KEY env var or
+        # openrouter_api_key.json are user environment, not workflow inputs.
         return (api_key, system_prompt, user_message_box, model,
                 web_search, cheapest, fastest, temp_float, pdf_engine, chat_mode,
                 timeout_int, aspect_ratio, image_resolution, seed, validated_reasoning_effort,

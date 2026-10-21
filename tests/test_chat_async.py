@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import inspect
+import os
 import sys
 import time
 import types
@@ -62,6 +63,12 @@ def make_node():
     node.fetch_credits = Mock(return_value="Remaining: $1.000")
     node.count_tokens = Mock(return_value=1)
     return node
+
+
+def setUpModule():
+    patcher = patch.dict(os.environ, {"LLM_KEY": "test-key"})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 class ChatAsyncTests(unittest.TestCase):

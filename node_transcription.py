@@ -104,7 +104,7 @@ class OpenRouterTranscriptionNode:
 
         Returns (transcription_text, stats_str, credits_str).
         """
-        api_key = shared.get_api_key(api_key)
+        api_key = shared.get_api_key()
         if not api_key:
             return (
                 "",

@@ -235,7 +235,7 @@ class OpenRouterVideoGenNode:
 
         Returns (video_object, stats_str, credits_str).
         """
-        api_key = shared.get_api_key(api_key)
+        api_key = shared.get_api_key()
         if not api_key:
             raise RuntimeError("API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json")
 

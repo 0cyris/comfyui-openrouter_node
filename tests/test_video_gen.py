@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import sys
 import types
 import unittest
@@ -49,6 +50,12 @@ def generate(**kwargs):
     args = dict(api_key="key", prompt="p", model="m", poll_interval=1, request_timeout=10)
     args.update(kwargs)
     return Node().generate_video(**args)
+
+
+def setUpModule():
+    patcher = patch.dict(os.environ, {"LLM_KEY": "test-key"})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 class VideoGenTests(unittest.TestCase):

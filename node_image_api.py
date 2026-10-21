@@ -110,7 +110,7 @@ class OpenRouterImageAPINode:
     def fetch_openrouter_models(cls):
         """Lists image model IDs and their supported_parameters via GET /api/v1/images/models; fetched in the background."""
         def load():
-            api_key = shared.get_api_key("")
+            api_key = shared.get_api_key()
             response = requests.get(
                 f"{shared.BASE_URL}/images/models",
                 headers=shared.build_standard_headers(api_key) if api_key else {},
@@ -237,7 +237,7 @@ class OpenRouterImageAPINode:
     async def generate_images(self, api_key, prompt, model, n=1, aspect_ratio="auto", resolution="default",
                               quality="auto", background="auto", seed=0, request_timeout=120,
                               retries=1, on_error="block", unique_id=None, prompt_input=None, **kwargs):
-        api_key = shared.get_api_key(api_key)
+        api_key = shared.get_api_key()
         if not api_key:
             raise RuntimeError("API Key not provided. Set LLM_KEY env var or use openrouter_api_key.json")
 

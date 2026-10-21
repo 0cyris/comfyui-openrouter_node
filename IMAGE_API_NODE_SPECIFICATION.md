@@ -54,7 +54,7 @@ Source: <https://openrouter.ai/docs/guides/overview/multimodal/image-generation.
 ### Inputs
 | Name | Type | Default | Sent as |
 |---|---|---|---|
-| `api_key` | STRING | `""` | Resolved through `shared.get_api_key` (field → `LLM_KEY` → `openrouter_api_key.json`) |
+| `api_key` | STRING | `""` | Hidden, ignored placeholder that keeps saved widget values aligned. The key is resolved through `shared.get_api_key` (`LLM_KEY` → `openrouter_api_key.json`) |
 | `prompt` | STRING multiline | `""` | `prompt` |
 | `model` | COMBO | first model | `model`; list from `GET /images/models`, cached like `shared.fetch_filtered_models` |
 | `n` | INT 1–10 | 1 | `n` (omitted when 1) |
