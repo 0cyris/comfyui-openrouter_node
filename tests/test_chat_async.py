@@ -293,6 +293,18 @@ class JsonSchemaTests(unittest.TestCase):
         })
         self.assertEqual(payload["provider"], {"require_parameters": True})
 
+    def test_unsupported_params_are_not_sent(self):
+        with patch.object(Node, "model_params", {"openai/gpt-4o": ["response_format", "seed"]}):
+            payload = self.sent_payload(json_schema=json.dumps(SCHEMA), reasoning_effort="high")
+        self.assertNotIn("temperature", payload)
+        self.assertNotIn("reasoning", payload)
+        self.assertEqual(payload["seed"], 0)
+
+    def test_unknown_model_keeps_params(self):
+        with patch.object(Node, "model_params", {}):
+            payload = self.sent_payload(json_schema=json.dumps(SCHEMA))
+        self.assertEqual(payload["temperature"], 1.0)
+
     def test_schema_combines_with_model_modifiers(self):
         with patch.object(node_module.requests, "post", return_value=make_response('{"a": 1}')) as post:
             asyncio.run(node_respond_cheapest(json.dumps(SCHEMA)))
