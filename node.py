@@ -29,6 +29,7 @@ class OpenRouterNode:
     """
 
     models_cache = None
+    model_params = {}
     failures = {}
     last_fetch_time = 0
     cache_duration = 3600  # Cache duration in seconds (1 hour)
@@ -109,9 +110,11 @@ class OpenRouterNode:
 
     @classmethod
     def fetch_openrouter_models(cls):
-        """Lists text-output model IDs from the OpenRouter API; fetched in the background."""
+        """Lists text-output model IDs and their supported_parameters from the OpenRouter API; fetched in the background."""
         def load():
-            cls.models_cache = shared.filter_models_by_output(shared.fetch_all_models_raw(), "text") or cls._fallback_models[:]
+            data = shared.fetch_all_models_raw()
+            cls.model_params = {m["id"]: m.get("supported_parameters") or [] for m in data if m.get("id")}
+            cls.models_cache = shared.filter_models_by_output(data, "text") or cls._fallback_models[:]
 
         return shared.cached_models(cls, load)
 
@@ -324,6 +327,15 @@ class OpenRouterNode:
         if schema is not None:
             data["response_format"] = {"type": "json_schema", "json_schema": {"name": "response", "strict": True, "schema": schema}}
             data.setdefault("provider", {})["require_parameters"] = True
+
+        # require_parameters filters out every provider when an unsupported field is sent
+        supported = self.model_params.get(model)
+        if supported is not None:
+            dropped = [k for k in ("temperature", "seed", "reasoning") if k in data and k not in supported]
+            for k in dropped:
+                del data[k]
+            if dropped:
+                print(f"[OpenRouterNode] {model} does not support: {', '.join(dropped)}. Not sending.")
 
         print(f"Payload: model={modified_model}")
 
